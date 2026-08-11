@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(docker *)",
+      "Bash(git push *)",
+      "Bash(gh *)"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-validate-findings.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

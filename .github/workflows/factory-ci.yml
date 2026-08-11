@@ -1,0 +1,38 @@
+name: Factory CI
+
+# Runs the exact same canonical factory checks used locally and by the
+# Claude Code Stop hook (see factory/README.md), independently of any
+# Claude session. No Claude/Anthropic API, no secrets, no deployments.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  factory-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      # No external Python packages are installed: the factory guards and
+      # tests are pure standard-library Python by design.
+
+      - name: Run canonical factory checks
+        run: python3 factory/guards/run-factory-checks.py
+
+      - name: Run factory guard tests
+        run: python3 -m unittest factory.guards.test_validate_finding factory.guards.test_run_factory_checks -v
+
+      - name: Run Stop hook tests
+        run: python3 .claude/hooks/test_stop_validate_findings.py -v

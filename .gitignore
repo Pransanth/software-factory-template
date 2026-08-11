@@ -1,0 +1,4 @@
+# Persoenliche/maschinenspezifische Claude-Code-Einstellungen -- niemals Teil
+# der versionierten Factory-Vorlage. Siehe factory/README.md, "Shared vs.
+# local Claude settings".
+.claude/settings.local.json
