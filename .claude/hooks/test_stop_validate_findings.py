@@ -8,10 +8,13 @@ unittest module path like "factory.guards.test_validate_finding" -- running
 the file directly works the same way via its own unittest.main() call.)
 
 Each test builds a throwaway project directory (a copy of the real
-factory/guards/validate-finding.py and run-factory-checks.py, plus one
-finding file) and points the hook at it via CLAUDE_PROJECT_DIR, then
-invokes the hook exactly the way Claude Code does: JSON on stdin, exit code
-as the result. The real factory/findings/P1-DEMO-1.md is never touched.
+factory/guards/validate-finding.py, run-factory-checks.py and
+validate-review.py, plus one finding file) and points the hook at it via
+CLAUDE_PROJECT_DIR, then invokes the hook exactly the way Claude Code
+does: JSON on stdin, exit code as the result. No real finding and no real
+review artifact of this repository is ever touched -- these throwaway
+projects have no factory/reviews/ directory at all, which
+run-factory-checks.py treats as "nothing to check" for that dimension.
 """
 import json
 import os
@@ -97,6 +100,7 @@ class StopHookTests(unittest.TestCase):
         shutil.copy2(
             REAL_GUARDS_DIR / "run-factory-checks.py", guards_dir / "run-factory-checks.py"
         )
+        shutil.copy2(REAL_GUARDS_DIR / "validate-review.py", guards_dir / "validate-review.py")
         # Always the same single finding file, its content changes per test
         # to simulate "the finding gets fixed between two stop attempts".
         self.finding_path = self.findings_dir / "finding.md"
@@ -142,23 +146,49 @@ class StopHookTests(unittest.TestCase):
         first = self.run_hook(stop_hook_active=False)
         self.assertEqual(first.returncode, 2)
 
-        # Claude "fixes" the finding, then tries to stop again.
+        # Claude "fixes" the finding, then tries to stop again. This still
+        # passes under the current hook -- but see the next test: it would
+        # pass even if the finding were NOT actually fixed, since a repeat
+        # attempt (stop_hook_active=True) is never re-checked or blocked a
+        # second time. This test only shows the fixed case still works, not
+        # that fixing was what made it pass.
         self.write_finding(VALID_ANALYZED_FINDING)
         second = self.run_hook(stop_hook_active=True)
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertNotIn("WARNUNG", second.stdout + second.stderr)
 
-    def test_hook_blocks_again_when_still_invalid_on_repeat_stop(self):
-        # stop_hook_active=True must NOT be treated as proof the finding is
-        # now valid: the hook always re-checks the real state and blocks
-        # again if it is still broken. Loop prevention is Claude Code's own
-        # documented block cap, not something this hook fakes by silently
-        # allowing an invalid state through.
+    def test_hook_does_not_block_again_on_repeat_stop_even_if_still_invalid(self):
+        # This is the key behavior change: stop_hook_active=True means "this
+        # hook already blocked once for this turn" -- it now exits 0
+        # immediately without even re-running the canonical checks, on
+        # purpose, regardless of whether the underlying state is still
+        # invalid. Loop prevention is this hook's own job now, not a
+        # platform block-cap that turned out not to reliably fire. The real,
+        # unbypassable gate is GitHub CI, not this local hook -- see the
+        # module docstring and factory/README.md.
         self.write_finding(INVALID_ANALYZED_FINDING)
-        result = self.run_hook(stop_hook_active=True)
+
+        first = self.run_hook(stop_hook_active=False)
+        self.assertEqual(first.returncode, 2)
+        self.assertIn("finding.md", first.stderr)
+
+        second = self.run_hook(stop_hook_active=True)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        # It must not even re-run the canonical runner's report on retry.
+        self.assertNotIn("[FEHLER]", second.stdout + second.stderr)
+        self.assertIn("wiederholter Stop-Versuch", second.stdout)
+        self.assertIn("GitHub CI", second.stdout)
+
+    def test_hook_first_attempt_ignores_stop_hook_active_flag_value(self):
+        # stop_hook_active is only ever meaningful as "true" (a genuine
+        # repeat). A caller sending stop_hook_active=False still gets the
+        # normal, first-attempt check-and-block behavior even on what would
+        # otherwise look like a "second" call -- this hook has no memory of
+        # prior calls, it only trusts the flag in the current event.
+        self.write_finding(INVALID_ANALYZED_FINDING)
+        result = self.run_hook(stop_hook_active=False)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("finding.md", result.stderr)
-        self.assertIn("wiederholter Stop-Versuch", result.stderr)
+        self.assertIn("[FEHLER]", result.stderr)
 
 
 if __name__ == "__main__":

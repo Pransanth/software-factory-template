@@ -14,28 +14,43 @@ from a Stop hook:
 See https://code.claude.com/docs/en/hooks.md for the Stop hook contract.
 
 On "stop_hook_active" (loop prevention):
-    stop_hook_active=true only means "Claude Code is retrying this stop
-    attempt after a Stop hook already blocked it at least once" -- it is
-    NOT evidence that whatever was invalid has since been fixed. Claude
-    could be retrying for an unrelated reason, or nothing may have changed
-    at all. So this hook always re-runs the real check, every single time,
-    and always reports its true result: a genuinely invalid state is
-    blocked (exit 2) on every attempt, not just the first.
+    On the FIRST stop attempt in a turn (stop_hook_active=false), this hook
+    always runs the real canonical check and blocks (exit 2) if anything is
+    genuinely invalid, with the concrete failure reason on stderr.
 
-    Loop prevention is therefore deliberately NOT this hook's job. Claude
-    Code itself already guarantees no infinite loop: per the official docs
-    (https://code.claude.com/docs/en/hooks-guide.md, "Limitations and
-    troubleshooting"), Claude Code overrides a Stop hook after it blocks
-    eight times in a row without progress, ends the turn anyway, and warns
-    that the Stop hook blocked too many consecutive times. That cap is
-    configurable via the CLAUDE_CODE_STOP_HOOK_BLOCK_CAP environment
-    variable. This platform-level cap -- not any logic in this script -- is
-    what makes an infinite loop impossible here. It is also the clearest
-    concrete illustration of why this hook is a local workflow guard and
-    not a final gate: after enough genuinely-still-invalid attempts, Claude
-    Code can and will let Claude stop regardless of what this hook returns.
-    See factory/README.md, "Was kann der Stop-Hook ausdruecklich NICHT
-    garantieren?".
+    On a REPEATED stop attempt (stop_hook_active=true) -- i.e. this hook
+    already blocked at least once for this turn -- it deliberately does NOT
+    run the check again and does NOT block a second time: it exits 0
+    immediately, regardless of whether the underlying state is now valid or
+    still invalid.
+
+    This is a considered change from an earlier version of this hook, which
+    re-checked and re-blocked on every single retry and relied on Claude
+    Code's own documented block cap (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,
+    nominally 8 consecutive blocks without progress) to eventually let a
+    stuck turn end. In practice that cap did not reliably terminate a real
+    stuck loop -- a session got stuck unable to end across many repeated
+    Stop-hook invocations, with no local recourse except a human manually
+    fixing the filesystem state from outside the session. Relying on a
+    platform cap that does not reliably fire is not an acceptable substitute
+    for local loop safety.
+
+    This hook is, and always was, a LOCAL WORKFLOW CONVENIENCE, not a final
+    security or merge gate -- see factory/README.md, "Was kann der
+    Stop-Hook ausdruecklich NICHT garantieren?". Blocking once, surfacing a
+    concrete reason, and then getting out of the way on retry preserves
+    that convenience (a genuinely invalid first attempt is still caught and
+    explained) without risking an unbounded local loop a second time.
+
+    This does NOT weaken any actual validation rule: factory/guards/
+    validate-finding.py, validate-review.py, and run-factory-checks.py
+    itself are completely unchanged and still enforce everything they
+    always did. What changed is only whether THIS hook re-blocks a SECOND
+    local stop attempt in the same turn -- not what counts as valid. The
+    real, unbypassable gate for this repository is GitHub CI
+    (.github/workflows/factory-ci.yml) plus a required status check on the
+    protected branch, which runs completely independently of any Claude
+    Code session and cannot be affected by ending a local turn.
 """
 import json
 import os
@@ -75,24 +90,29 @@ def main():
 
     stop_hook_active = bool(hook_input.get("stop_hook_active"))
 
+    if stop_hook_active:
+        # A repeated stop attempt in the same turn -- this hook already
+        # blocked once. Do not re-check and do not block again; see the
+        # module docstring for why. The real, unbypassable gate is GitHub
+        # CI, not this local hook.
+        print(
+            "Factory-Guard: wiederholter Stop-Versuch. Dieser lokale Hook blockiert "
+            "kein zweites Mal in derselben Aufgabe. Die verbindliche, unumgehbare "
+            "Schranke ist GitHub CI (.github/workflows/factory-ci.yml) mit Required "
+            "Status Check auf dem geschuetzten Branch, nicht dieser lokale Hook -- "
+            "siehe factory/README.md."
+        )
+        return 0
+
     root = project_root()
     ok, output = run_factory_checks(root)
 
     if ok:
         return 0
 
-    # Always block on a genuinely invalid state -- stop_hook_active is never
-    # treated as proof that things are fine, only used for a clarifying note.
-    retry_note = (
-        "Dies ist ein wiederholter Stop-Versuch; der Zustand wurde erneut\n"
-        "tatsaechlich ueberprueft und ist weiterhin ungueltig.\n\n"
-        if stop_hook_active
-        else ""
-    )
     print(
         "Factory-Guard: mindestens ein Factory-Check ist fehlgeschlagen.\n"
         "Die Aufgabe darf nicht beendet werden, bevor alle Checks bestehen.\n\n"
-        + retry_note
         + output,
         file=sys.stderr,
     )

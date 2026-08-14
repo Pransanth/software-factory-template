@@ -2,3 +2,7 @@
 # der versionierten Factory-Vorlage. Siehe factory/README.md, "Shared vs.
 # local Claude settings".
 .claude/settings.local.json
+
+# Finding-Worktrees (siehe factory/scripts/create-finding-worktree.sh) sind
+# lokale Arbeitskopien, kein Teil der Vorlage.
+.claude/worktrees/

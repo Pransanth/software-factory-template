@@ -2,9 +2,31 @@
   "permissions": {
     "deny": [
       "Bash(docker *)",
-      "Bash(git push *)",
-      "Bash(gh *)"
+      "Edit(/factory/reviews/**)",
+      "Write(/factory/reviews/**)",
+      "Edit(/.claude/hooks/**)",
+      "Write(/.claude/hooks/**)",
+      "Edit(/.claude/skills/**)",
+      "Write(/.claude/skills/**)",
+      "Edit(/.claude/agents/**)",
+      "Write(/.claude/agents/**)",
+      "Edit(/.claude/settings.json)",
+      "Write(/.claude/settings.json)"
     ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "denyWrite": [
+        "./factory/reviews",
+        "./.claude/hooks",
+        "./.claude/skills",
+        "./.claude/agents",
+        "./.claude/settings.json",
+        "./.claude/settings.local.json"
+      ]
+    }
   },
   "hooks": {
     "Stop": [
@@ -13,6 +35,18 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-validate-findings.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "finding-closure-reviewer",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/subagentstop-write-review.py\"",
             "timeout": 30
           }
         ]
