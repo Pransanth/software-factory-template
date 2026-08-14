@@ -391,10 +391,10 @@ print("OK %s %s %s" % (data.get("full_name"), data.get("default_branch"), "push"
       API_PUSH="$4"
       ok "GitHub-API erreichbar, gh-api.sh funktioniert: $API_FULL_NAME"
       if [ "$API_PUSH" = "push" ]; then
-        ok "Token hat Schreibrechte auf $API_FULL_NAME -- Branch-Push und PR-Erstellung moeglich."
+        ok "Token darf auf $API_FULL_NAME schreiben (Contents) -- Branch-Push moeglich."
       else
-        missing "Token hat keine Schreibrechte auf $API_FULL_NAME." \
-          "Dem Token Schreibrechte (Contents read/write, Pull requests read/write) fuer $REPO_SLUG geben."
+        missing "Token hat keine Schreibrechte (Contents) auf $API_FULL_NAME." \
+          "Dem Token 'Contents: read/write' fuer $REPO_SLUG geben."
       fi
       if [ -n "$DEFAULT_BRANCH" ] && [ "$API_DEFAULT_BRANCH" != "$DEFAULT_BRANCH" ]; then
         missing "Default-Branch laut GitHub ($API_DEFAULT_BRANCH) weicht vom Remote-HEAD ($DEFAULT_BRANCH) ab." \
@@ -407,7 +407,55 @@ print("OK %s %s %s" % (data.get("full_name"), data.get("default_branch"), "push"
       ;;
   esac
 
-  # 7d. gh-query.sh functional (the fixed, approval-free summary layer).
+  # 7d. PR creation permission, probed WITHOUT creating anything.
+  #
+  # Contents:write (checked above) is NOT the same permission as
+  # "Pull requests: write" on a fine-grained token: pushing a finding branch
+  # can succeed while POST /pulls is refused -- observed in practice, and
+  # only at the moment the factory wanted to open its PR. Onboarding has to
+  # catch that earlier, so this probes the real endpoint with head == base:
+  # such a request can never create a pull request, and GitHub checks token
+  # permission before it validates the payload. A refusal therefore means
+  # "permission missing", any other answer (a validation error) means the
+  # permission is there.
+  if [ -n "$DEFAULT_BRANCH" ]; then
+    PR_PROBE="$("$ROOT/factory/scripts/gh-api.sh" POST /pulls "{\"title\":\"factory-preflight permission probe (cannot create a PR: head == base)\",\"head\":\"$DEFAULT_BRANCH\",\"base\":\"$DEFAULT_BRANCH\"}" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("UNREADABLE")
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    print("UNREADABLE")
+    raise SystemExit(0)
+if data.get("number"):
+    print("CREATED")
+elif "not accessible" in str(data.get("message", "")) or str(data.get("status")) == "403":
+    print("FORBIDDEN")
+else:
+    print("PERMITTED")
+' 2>/dev/null)"
+    case "$PR_PROBE" in
+      PERMITTED)
+        ok "Token darf Pull Requests erstellen (geprueft ohne einen PR anzulegen)."
+        ;;
+      FORBIDDEN)
+        missing "Token darf keine Pull Requests auf $REPO_SLUG erstellen." \
+          "Dem GitHub-Token die Berechtigung 'Pull requests: read/write' fuer $REPO_SLUG geben (Fine-grained PAT: Repository permissions -> Pull requests). 'Contents: read/write' allein genuegt nicht -- damit gelingt der Push, aber nicht der PR."
+        ;;
+      CREATED)
+        missing "Unerwartet: die PR-Probe hat einen Pull Request erzeugt." \
+          "Diesen unerwartet erzeugten Pull Request auf $REPO_SLUG pruefen und schliessen."
+        ;;
+      *)
+        missing "PR-Berechtigung nicht pruefbar (keine verwertbare API-Antwort)." \
+          "Netzwerkzugang und Token pruefen und den Preflight erneut ausfuehren."
+        ;;
+    esac
+  fi
+
+  # 7e. gh-query.sh functional (the fixed, approval-free summary layer).
   QUERY_BRANCH="$("$ROOT/factory/scripts/gh-query.sh" default-branch 2>/dev/null | awk '/^default_branch:/ { print $2 }')"
   if [ -n "$QUERY_BRANCH" ]; then
     ok "gh-query.sh funktioniert (default-branch: $QUERY_BRANCH)."
@@ -417,7 +465,7 @@ print("OK %s %s %s" % (data.get("full_name"), data.get("default_branch"), "push"
   fi
 
   if [ -n "$DEFAULT_BRANCH" ]; then
-    # 7e. CI readable.
+    # 7f. CI readable.
     if "$ROOT/factory/scripts/gh-query.sh" actions-run-summary "$DEFAULT_BRANCH" >/dev/null 2>&1; then
       ok "CI-Laeufe sind lesbar (Actions-API ueber gh-query.sh)."
     else
@@ -425,7 +473,7 @@ print("OK %s %s %s" % (data.get("full_name"), data.get("default_branch"), "push"
         "Dem Token 'Actions: read' fuer $REPO_SLUG geben."
     fi
 
-    # 7f. Branch protection / ruleset on the default branch.
+    # 7g. Branch protection / ruleset on the default branch.
     RULES_REPORT="$("$ROOT/factory/scripts/gh-query.sh" branch-rules "$DEFAULT_BRANCH" 2>/dev/null | python3 -c '
 import json, sys
 try:
@@ -452,7 +500,7 @@ else:
         ;;
     esac
 
-    # 7g. Required status check must name the factory CI job.
+    # 7h. Required status check must name the factory CI job.
     REQUIRED_OUT="$("$ROOT/factory/scripts/gh-query.sh" required-checks "$DEFAULT_BRANCH" 2>/dev/null)"
     if printf '%s' "$REQUIRED_OUT" | grep -q "required_status_check: $REQUIRED_CHECK"; then
       ok "Required Status Check '$REQUIRED_CHECK' ist auf $DEFAULT_BRANCH konfiguriert."

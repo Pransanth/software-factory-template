@@ -254,6 +254,25 @@ class FactoryPreflightTests(unittest.TestCase):
                 f"factory-preflight.sh must not hardcode {forbidden!r}",
             )
 
+    def test_pr_permission_probe_can_never_create_a_pull_request(self):
+        """Contents:write and Pull requests:write are different token
+        permissions -- a push can succeed while POST /pulls is refused. The
+        preflight therefore probes the real endpoint, but with head == base,
+        which GitHub can never turn into a pull request."""
+        source = REAL_SCRIPT.read_text(encoding="utf-8")
+        probe_lines = [
+            line
+            for line in source.splitlines()
+            if "POST /pulls" in line and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(len(probe_lines), 1, probe_lines)
+        probe = probe_lines[0]
+        self.assertIn('\\"head\\":\\"$DEFAULT_BRANCH\\"', probe)
+        self.assertIn('\\"base\\":\\"$DEFAULT_BRANCH\\"', probe)
+        # And the refusal is classified as a missing prerequisite, not as a
+        # generic error the operator has to interpret.
+        self.assertIn("Pull requests: read/write", source)
+
     def test_script_never_prints_the_credential(self):
         """The credential check must prove presence without ever emitting the
         value: the only use of the credential-helper output is a grep -q."""

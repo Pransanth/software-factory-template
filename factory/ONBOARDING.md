@@ -28,7 +28,8 @@ Berechtigungen und erstellt keinen PR. Es prüft, erklärt — und wird danach e
 | 7 | Default-Branch live vom Remote ermittelbar | Kein geratener Branchname; Konvention ist `origin/<default-branch>`. |
 | 8 | Repo-spezifisches GitHub-Credential | `gh-api.sh` nutzt den git-credential-Helper; der Wert wird nie ausgegeben. |
 | 9 | GitHub-API erreichbar, `gh-api.sh` funktioniert | Ohne `gh`-CLI. |
-| 10 | Schreibrechte des Tokens (`permissions.push`) | Push und PR-Erstellung müssen möglich sein — geprüft, ohne einen PR anzulegen. |
+| 10 | Schreibrechte des Tokens (Contents) | Ohne sie schlägt schon `git push origin <branch>` fehl. |
+| 10b | PR-Erstellung erlaubt | Eigene Prüfung, weil `Contents: write` **nicht** `Pull requests: write` einschließt: der Push kann gelingen und `POST /pulls` trotzdem mit 403 abgelehnt werden (real beobachtet, und zwar erst in dem Moment, in dem die Factory ihren PR eröffnen wollte). Geprüft wird gegen den echten Endpunkt mit `head == base` — daraus kann GitHub niemals einen PR machen. |
 | 11 | `gh-query.sh` funktioniert | Die feste, approval-freie Abfrageschicht. |
 | 12 | CI-Läufe lesbar | Ohne CI-Lesbarkeit gibt es keine echte `CI Evidence`. |
 | 13 | Branch-Schutz/Ruleset auf dem Default-Branch | Sonst ist der Merge-Gate nur Behauptung. |
@@ -47,7 +48,9 @@ zu treffen, sondern eine konkrete Einrichtung durchzuführen.
 
 2. **Repo-spezifisches Token.** Ein Fine-grained Personal Access Token, das **nur** auf dieses
    Repository Zugriff hat, mit: `Contents: read/write`, `Pull requests: read/write`,
-   `Actions: read`, `Administration: read`. Es wird im git-credential-Helper hinterlegt (z. B.
+   `Actions: read`, `Administration: read`. Alle vier werden gebraucht — insbesondere ist
+   `Pull requests: read/write` **zusätzlich** zu `Contents: read/write` nötig: ohne sie
+   funktioniert `git push`, aber die PR-Erstellung wird mit 403 abgelehnt. Es wird im git-credential-Helper hinterlegt (z. B.
    beim ersten `git push` über HTTPS). Empfehlenswert, damit mehrere Projekte auf derselben
    Maschine getrennte Tokens verwenden können:
    `git config --global credential.https://github.com.useHttpPath true` — `gh-api.sh` fragt das
