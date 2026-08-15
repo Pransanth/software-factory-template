@@ -180,6 +180,13 @@ REQUIRED_FILES=(
   "factory/guards/gh_evidence.py"
   "factory/guards/finding_state.py"
   "factory/guards/run-project-tests.py"
+  # Audit-Befund F-18: der einzige Finding-Parser. Ohne ihn ist kein Guard
+  # lauffaehig, der einen Status liest.
+  "factory/guards/finding_format.py"
+  # Audit-Befund F-21: der Produkttest-Adapter und seine Konfiguration. Ohne
+  # sie ist nicht bestimmbar, welche Produkttests als Verification gelten.
+  "factory/guards/project_tests.py"
+  "factory/project-tests.conf"
   "factory/control-plane.sha256"
   "factory/scripts/gh-api.sh"
   "factory/scripts/gh-query.sh"

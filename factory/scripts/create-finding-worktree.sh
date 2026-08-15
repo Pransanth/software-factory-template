@@ -145,6 +145,63 @@ case "$SUBCOMMAND" in
 
     DEFAULT_BRANCH="$(resolve_default_branch)"
 
+    # Audit finding F-15, observed rather than assumed: while the factory's own
+    # sandbox is active, this call CANNOT succeed. Checking out a worktree means
+    # writing every tracked file, and the control plane (.claude/agents/**,
+    # .claude/hooks/**, factory/guards/**, ...) is exactly what the sandbox
+    # refuses to let the agent write:
+    #
+    #   error: unable to create file .claude/agents/finding-closure-reviewer.md:
+    #          Operation not permitted
+    #   fatal: Could not reset index file to revision 'HEAD'.
+    #
+    # Reproduced with the target inside AND outside .claude/, so it is not about
+    # placement. The F-05 control-plane protection and the worktree mode are
+    # mutually exclusive by construction -- nothing is malfunctioning. Factory v1
+    # is therefore deliberately SEQUENTIAL (see CLAUDE.md). A raw git error would
+    # look like a transient glitch, so the incompatibility is named explicitly.
+    #
+    # Checked BEFORE `git worktree add`, not after: a half-created worktree plus
+    # a dangling branch would have to be cleaned up, and the failure would look
+    # like something went wrong rather than like a specified boundary. The probe
+    # is a positive observation -- can this process write one byte into a
+    # control-plane directory? -- not an assumption about the environment.
+    # The probe must distinguish "write refused" from "directory absent".
+    # Without that distinction it also fires in throwaway repositories that
+    # simply have no .claude/agents/ -- which is not a sandbox at all. So the
+    # probe runs only against a control-plane directory that actually exists,
+    # and a repository with no control plane to protect is not blocked.
+    PROBE_DIR=""
+    for candidate in ".claude/agents" ".claude/hooks" "factory/guards"; do
+      if [ -d "$candidate" ]; then
+        PROBE_DIR="$candidate"
+        break
+      fi
+    done
+
+    if [ -n "$PROBE_DIR" ]; then
+    PROBE_FILE="$PROBE_DIR/.worktree-sandbox-probe"
+    # `touch` rather than a `>` redirection: a failing redirection is reported
+    # by the shell itself before `2>/dev/null` takes effect, so the raw
+    # "Operation not permitted" would leak into the output next to the
+    # explanation below.
+    if ! touch "$PROBE_FILE" 2>/dev/null; then
+      echo "SANDBOX_WORKTREE_INCOMPATIBLE: Ein Finding-Worktree kann in dieser Sitzung nicht angelegt werden." >&2
+      echo "grund: Einen Worktree auszuchecken heisst, jede getrackte Datei zu schreiben -- einschliesslich der Kontrollebene (.claude/agents/**, .claude/hooks/**, factory/guards/**). Genau die ist fuer diesen Agenten gesperrt (permissions.deny + sandbox.filesystem.denyWrite). Positiv beobachtet: das Schreiben von '$PROBE_FILE' wurde verweigert." >&2
+      echo "einordnung: Das ist der Schutz aus Audit-Befund F-05 in bestimmungsgemaesser Funktion -- keine Stoerung, kein transienter Fehler und nichts, was durch Lockern von Berechtigungen zu 'reparieren' waere." >&2
+      echo "stattdessen: Factory v1 ist bewusst sequentiell spezifiziert (Audit-Befund F-15, Ergebnis B). Ein Finding nach dem anderen, im Hauptrepository, auf einem eigenen Branch -- siehe CLAUDE.md, 'Mehrere Findings: bewusst sequentiell (der unterstuetzte Ablauf)'. Parallele Claude-Worktree-Sessions sind als v1.x-Faehigkeit vorgemerkt, nicht Teil von v1." >&2
+      exit 4
+    fi
+    rm -f "$PROBE_FILE"
+    fi
+
+    # Kein mktemp und keine stderr-Zwischendatei: das System-Temp-Verzeichnis
+    # ist unter der Sandbox nicht beschreibbar ('mkstemp failed ... Operation
+    # not permitted'), was die Worktree-Erzeugung auch dort scheitern liesse,
+    # wo sie voellig legitim ist. Der Sandbox-Fall ist oben bereits abgefangen;
+    # jeder andere Fehlschlag von 'git worktree add' bricht hier durch 'set -e'
+    # mit Gits eigener Meldung ab, die aussagekraeftiger waere als jede
+    # Umformulierung.
     git worktree add --no-track -b "$BRANCH" "$WT_PATH" "origin/$DEFAULT_BRANCH"
 
     # `git -C` is used here on purpose and is the documented exception to

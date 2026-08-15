@@ -40,6 +40,12 @@ REQUIRED_FILES = [
     "factory/guards/validate-build-order.py",
     "factory/guards/validate-control-plane.py",
     "factory/guards/scope_hash.py",
+    # Audit-Befund F-18: der einzige Finding-Parser. Ohne ihn scheitert jeder
+    # Guard-Aufruf im vorbereiteten Repository mit ModuleNotFoundError.
+    "factory/guards/finding_format.py",
+    # Audit-Befund F-21: Produkttest-Adapter und seine Konfiguration.
+    "factory/guards/project_tests.py",
+    "factory/project-tests.conf",
     "factory/guards/gh_evidence.py",
     "factory/guards/finding_state.py",
     "factory/guards/run-project-tests.py",

@@ -69,6 +69,9 @@ from pathlib import Path
 # validate-finding.py for the full explanation of that defect).
 sys.dont_write_bytecode = True
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from finding_format import parse_finding  # noqa: E402
+
 # factory/guards/validate-build-order.py -> parents[2] = repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BUILD_ORDERS_DIR = REPO_ROOT / "factory" / "build-orders"
@@ -77,7 +80,8 @@ FINDINGS_DIR = REPO_ROOT / "factory" / "findings"
 # Files in factory/build-orders/ that are documentation, not build orders.
 NON_BUILD_ORDER_NAMES = {"README.md"}
 
-STATUS_LINE_RE = re.compile(r"^Status:\s*(.*)$", re.IGNORECASE)
+# No STATUS_LINE_RE here any more: the finding's status is read through
+# finding_format.parse_finding (F-18), never by scanning this file's own text.
 TITLE_RE = re.compile(r"^#\s*Bauauftrag:\s*(.+?)\s*$")
 SECTION_HEADING_RE = re.compile(r"^##\s+(.*?)\s*$")
 ANY_TOP_HEADING_RE = re.compile(r"^#{1,2}\s")
@@ -182,12 +186,17 @@ def read_title_id(text):
 
 
 def read_finding_status(finding_path):
-    """The finding's Status value, or None if it has none."""
-    for raw_line in finding_path.read_text(encoding="utf-8").splitlines():
-        match = STATUS_LINE_RE.match(raw_line.strip())
-        if match:
-            return match.group(1).strip().upper()
-    return None
+    """The finding's Status value, or None if it has none.
+
+    Read through finding_format, the single canonical finding parser (audit
+    finding F-18). This function used to scan the whole document for the first
+    `Status:` line, which meant a quoted ticket or log excerpt could set the
+    status the evidence lifecycle below depends on -- a finding at VERIFYING
+    could be read as OPEN and escape the requirement to quote a green run.
+    """
+    text = finding_path.read_text(encoding="utf-8")
+    status = parse_finding(text)["status"]
+    return status.strip().upper() if status else None
 
 
 def has_quoted_output(body):

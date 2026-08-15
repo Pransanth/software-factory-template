@@ -116,13 +116,90 @@ Was **nicht** ohne Weiteres läuft und auch nicht laufen soll: P0, `EXPERT_REVIE
 Produkt-/Scope-Entscheidungen und `AUTONOMY_BLOCKER` — siehe `CLAUDE.md`, "Wann die Factory
 wirklich stoppt".
 
-## Umzug auf ein neues Projekt
+## Umzug auf ein neues, leeres Projekt
 
 1. Inhalt dieser Vorlage in das neue Repository kopieren (ohne `.claude/settings.local.json` —
    die ist maschinenspezifisch).
 2. `factory/scripts/factory-preflight.sh` ausführen und den vier Schritten oben folgen.
-3. Produktcode ergänzen (per Konvention `app/`, sonst
-   `python3 factory/guards/run-project-tests.py --project-dir <dir>` bzw.
-   `FACTORY_PROJECT_DIR=<dir>` für den Preflight).
-4. Projektspezifische Guards ergänzen: eigene `factory/guards/validate-*.py` plus ein Aufruf in
+3. Produktcode ergänzen.
+4. `factory/project-tests.conf` konfigurieren (siehe nächster Abschnitt). **Ohne diesen Schritt
+   blockiert die Factory**, sobald getrackte Dateien außerhalb der Factory-Pfade existieren.
+5. Projektspezifische Guards ergänzen: eigene `factory/guards/validate-*.py` plus ein Aufruf in
    `run-factory-checks.py`. Die Vorlage enthält bewusst keine produktspezifischen Guards.
+
+## Integration in ein **bestehendes** reales Projekt
+
+Der wichtigste Unterschied zum leeren Projekt: die Factory wird **additiv** integriert. Sie
+ersetzt nichts, was das Projekt schon hat.
+
+### 1. Produkttests einbinden statt ersetzen
+
+Die Factory kennt das Testframework des Projekts nicht (Audit-Befund F-21). Die vorhandenen Tests
+werden über `factory/project-tests.conf` eingebunden — mit genau den Kommandos, die das Projekt
+ohnehin benutzt:
+
+```
+mode: real-project
+
+[suite: go-unit]
+command: go test ./...
+
+[suite: frontend]
+command: npm test --silent
+workdir: web
+```
+
+Jede deklarierte Suite wird ausgeführt; ein einziger roter Exit-Code ist Gesamtfehler. Kommandos
+laufen **ohne Shell** (Argumentliste, `shlex`-zerlegt) — wer eine Pipeline braucht, legt sie in
+ein Skript des Projekts und ruft dieses hier als ein Kommando auf.
+
+Diese Datei ist Control Plane. Sie zu ändern ist ein `FACTORY_CHANGE`, und das ist Absicht: wer
+bestimmen kann, welche Tests als gültige Verification zählen, darf das nicht während normaler
+Finding-Arbeit tun.
+
+### 2. Bestehende CI nicht ersetzen
+
+`.github/workflows/factory-ci.yml` kommt **zusätzlich** zu den vorhandenen Workflows. Der
+verbindliche Required Status Check der Factory ist der Job `factory-checks`; die bestehenden
+Checks des Projekts bleiben unverändert bestehen und sollten weiterhin required sein. Ein
+vorhandener Workflow wird nicht umgeschrieben, damit die Factory hineinpasst.
+
+### 3. Bestehende `CLAUDE.md` zusammenführen, nicht überschreiben
+
+Hat das Projekt bereits eine `CLAUDE.md`, wird der Factory-Teil **eingefügt**, nicht darübergelegt.
+Die projektspezifischen Anweisungen bleiben erhalten. Praktisch: den Factory-Abschnitt als
+zusammenhängenden Block übernehmen und die vorhandenen Abschnitte davor oder danach stehen lassen.
+Da `CLAUDE.md` Control Plane ist, ist das Zusammenführen selbst ein `FACTORY_CHANGE`.
+
+### 4. Bestehende Branch Protection prüfen, nicht blind ersetzen
+
+`factory-preflight.sh` **liest** den vorhandenen Schutz und meldet, was fehlt — er ändert nichts.
+Hat das Projekt bereits Regeln, werden die der Factory dazu passend ergänzt. Existiert ein
+Ruleset, das erforderliche Approvals verlangt, meldet der Preflight das als `[GOVERNANCE]`-Punkt.
+
+### 5. Governance-Konflikte sind Entscheidungen, keine technischen Aufgaben
+
+Verlangt das Projekt menschliche Approvals auf dem Default-Branch, kann die Factory nicht autonom
+mergen. Das ist **kein** Fehler und wird **nicht** technisch umgangen. Der Projektinhaber
+entscheidet: entweder die Factory darf autonom mergen, oder der letzte Schritt bleibt menschlich
+und die Factory endet bei `READY_FOR_CLOSURE`. Ein Workaround dafür wird nicht gebaut.
+
+### 6. Bestehende Guards zusätzlich ausführen
+
+Vorhandene Linter, Typprüfungen und Sicherheitsscanner des Projekts werden nicht ersetzt. Sie
+laufen entweder weiter in der bestehenden CI oder werden als eigene Suite in
+`factory/project-tests.conf` aufgenommen. Der kanonische Runner
+(`run-factory-checks.py`) prüft die Factory-Invarianten — er ist keine Ablösung der
+Projekt-Qualitätssicherung.
+
+### 7. Die Control Plane bleibt von normaler Finding-Arbeit getrennt
+
+Nach der Integration gilt unverändert: ein Finding fasst die Kontrollebene nicht an. Wer sie
+ändern will, macht ein `FACTORY_CHANGE` mit eigenem Branch, Negativtests, vollständiger CI,
+unabhängigem Review und menschlicher Entscheidung.
+
+### 8. Ein Finding zur Zeit
+
+Factory v1 ist bewusst sequentiell (Audit-Befund F-15). Parallele Claude-Worktree-Sessions sind
+nicht Teil von v1 — der Grund und die Beobachtung dahinter stehen in `CLAUDE.md`, Abschnitt
+„Mehrere Findings: bewusst sequentiell".

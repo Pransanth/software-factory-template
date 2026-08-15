@@ -23,7 +23,9 @@
       "Edit(/CLAUDE.md)",
       "Write(/CLAUDE.md)",
       "Edit(/factory/control-plane.sha256)",
-      "Write(/factory/control-plane.sha256)"
+      "Write(/factory/control-plane.sha256)",
+      "Edit(/factory/project-tests.conf)",
+      "Write(/factory/project-tests.conf)"
     ]
   },
   "sandbox": {
@@ -42,7 +44,8 @@
         "./.claude/settings.json",
         "./.claude/settings.local.json",
         "./CLAUDE.md",
-        "./factory/control-plane.sha256"
+        "./factory/control-plane.sha256",
+        "./factory/project-tests.conf"
       ]
     }
   },

@@ -56,6 +56,8 @@ VALIDATOR = THIS_DIR / "validate-finding.py"
 REVIEW_GUARD = THIS_DIR / "validate-review.py"
 CONTROL_PLANE_GUARD = THIS_DIR / "validate-control-plane.py"
 BUILD_ORDER_GUARD = THIS_DIR / "validate-build-order.py"
+PROJECT_TESTS_MODULE = THIS_DIR / "project_tests.py"
+REPO_ROOT = THIS_DIR.parents[1]
 DEFAULT_FINDINGS_DIR = THIS_DIR.parent / "findings"
 DEFAULT_REVIEWS_DIR = THIS_DIR.parent / "reviews"
 DEFAULT_BUILD_ORDERS_DIR = THIS_DIR.parent / "build-orders"
@@ -221,6 +223,58 @@ def run_control_plane_checks():
     return False, report
 
 
+def run_project_test_configuration_check():
+    """Check the product-test CONFIGURATION, not the product tests themselves.
+
+    The distinction matters (audit finding F-21). Running the product suite here
+    would break a deliberate design decision: during IMPLEMENTING, a red
+    regression test before the fix is a wanted intermediate state, and the local
+    Stop hook runs this runner at every end of turn. So the runner asks only the
+    structural question -- is it determined which product tests count? -- and
+    leaves the actual run to CI, where "this change is finished" is claimed.
+
+    A real project without a test configuration is a blocker here, because that
+    state cannot be fixed by any later check: nothing downstream would notice
+    that the product was never tested.
+    """
+    report = []
+
+    if not PROJECT_TESTS_MODULE.is_file():
+        report.append(
+            f"[FEHLER] project-tests-guard: Modul nicht gefunden: {PROJECT_TESTS_MODULE}"
+        )
+        return False, report
+
+    sys.path.insert(0, str(PROJECT_TESTS_MODULE.parent))
+    try:
+        import project_tests
+    except ImportError as exc:  # pragma: no cover - defensive
+        report.append(f"[FEHLER] project-tests-guard: nicht importierbar ({exc})")
+        return False, report
+
+    exit_code, state, lines = project_tests.evaluate(REPO_ROOT)
+
+    if state == project_tests.STATE_REAL_PROJECT_WITHOUT_TEST_CONFIGURATION:
+        report.append(f"[FEHLER] project-tests-guard: {state}")
+        for line in lines:
+            if line.strip() and not line.startswith("PROJECT_TESTS:"):
+                report.append(f"           {line}")
+        return False, report
+
+    if state == project_tests.STATE_TEMPLATE_WITHOUT_PRODUCT:
+        report.append(
+            "[OK]     project-tests-guard: TEMPLATE_WITHOUT_PRODUCT "
+            "(Vorlage ohne Produktcode -- erwartet)"
+        )
+        return True, report
+
+    report.append(
+        "[OK]     project-tests-guard: CONFIGURED "
+        "(Produkttests deklariert; ausgefuehrt werden sie in der CI)"
+    )
+    return True, report
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -247,9 +301,22 @@ def main(argv):
     build_order_ok, build_order_report = run_build_order_checks(args.build_orders_dir)
     reviews_ok, reviews_report = run_review_checks(args.reviews_dir)
     control_plane_ok, control_plane_report = run_control_plane_checks()
+    project_tests_ok, project_tests_report = run_project_test_configuration_check()
 
-    ok = finding_ok and build_order_ok and reviews_ok and control_plane_ok
-    report = finding_report + build_order_report + reviews_report + control_plane_report
+    ok = (
+        finding_ok
+        and build_order_ok
+        and reviews_ok
+        and control_plane_ok
+        and project_tests_ok
+    )
+    report = (
+        finding_report
+        + build_order_report
+        + reviews_report
+        + control_plane_report
+        + project_tests_report
+    )
 
     stream = sys.stdout if ok else sys.stderr
     for line in report:

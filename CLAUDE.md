@@ -59,6 +59,30 @@ breitere Berechtigungen ersetzen — und danach den Preflight erneut ausführen.
 technische Aufgabe: der Projektinhaber entscheidet, ob die Factory autonom mergen darf oder ob
 der letzte Schritt menschlich bleibt. Ein technischer Workaround dafür wird nicht gebaut.
 
+## Produkttests: die Factory kennt das Testframework des Projekts nicht
+
+Die Factory sucht **nicht** nach Testdateien und rät nicht, in welcher Sprache das Produkt
+geschrieben ist. Das Projekt deklariert seine Testkommandos in
+[`factory/project-tests.conf`](factory/project-tests.conf), und
+[`factory/guards/run-project-tests.py`](factory/guards/run-project-tests.py) führt genau diese aus
+— als Argumentliste, ohne Shell.
+
+Vorher war das anders und still gefährlich (Audit-Befund F-21): gesucht wurde `app/**/test_*.py`.
+Für ein Go-, Node-, Java- oder Multi-Service-Projekt fand die Suche nichts — und meldete Exit 0.
+Die einzige Stelle, an der die Factory fragt „funktioniert das Produkt noch?", antwortete „ja",
+ohne je einen Produkttest ausgeführt zu haben.
+
+Es gibt genau drei Zustände, und nur der erste ist ohne Produkttests grün:
+
+| Zustand | Exit | Bedeutung |
+|---|---|---|
+| `TEMPLATE_WITHOUT_PRODUCT` | 0 | Reine Vorlage: keine getrackten Dateien außerhalb der Factory-Pfade, `mode: template`. |
+| `CONFIGURED` | 0 / 1 | Mindestens eine Suite deklariert; **jede** wird ausgeführt, ein einziger roter Exit-Code ist Gesamtfehler. |
+| `REAL_PROJECT_WITHOUT_TEST_CONFIGURATION` | 2 | Produktcode vorhanden, aber keine Suite konfiguriert. Harter Blocker. |
+
+„Nichts gefunden" bedeutet nie mehr Exit 0. Eine fehlende `project-tests.conf` ist immer ein
+Blocker — die Vorlage liefert sie mit, ihr Fehlen heißt also, dass jemand sie entfernt hat.
+
 ## Grundregel: Sicherheitsbefunde nicht direkt reparieren
 
 Sicherheitsbefunde werden **nicht direkt repariert**. Sie durchlaufen stattdessen den
@@ -146,7 +170,13 @@ factory/reviews/**       factory/guards/**        factory/scripts/**
 .claude/hooks/**         .claude/agents/**        .claude/skills/**
 .claude/rules/**         .claude/settings*.json   .github/workflows/**
 CLAUDE.md                factory/control-plane.sha256
+factory/project-tests.conf
 ```
+
+`factory/project-tests.conf` gehört seit dem Real-Project-Readiness-Paket dazu: dort steht, welche
+Produkttests als gültige Verification gelten. Wer das während normaler Finding-Arbeit ändern
+könnte, könnte eine rote Testsuite verschwinden lassen, ohne eine einzige Testdatei anzufassen.
+Sie wird einmalig beim Onboarding eines echten Projekts konfiguriert — als `FACTORY_CHANGE`.
 
 Der Schutz ist zweischichtig: lokal über `permissions.deny` und `sandbox.filesystem.denyWrite`
 in `.claude/settings.json`, und — verbindlich, weil serverseitig — über
@@ -198,8 +228,9 @@ mehr: `git -C <pfad> commit …` erzeugt eine Approval-Abfrage und bricht damit 
 unbeaufsichtigten Factory-Lauf ab. Daraus folgt:
 
 - **Kein** `git -C <pfad> commit …`, `git -C <pfad> push …` o. Ä. für normale Finding-Arbeit.
-  Stattdessen zuerst in das richtige Verzeichnis wechseln (bei paralleler Arbeit: den Worktree
-  über `EnterWorktree` betreten) und dann den einfachen Befehl absetzen.
+  Stattdessen zuerst in das richtige Verzeichnis wechseln und dann den einfachen Befehl absetzen.
+  In v1 ist das immer die Repo-Wurzel: die Factory arbeitet sequentiell, siehe „Mehrere Findings"
+  unten.
 - Auch keine Ersatzkonstruktionen wie `cd <pfad> && git commit …`: zusammengesetzte Befehle,
   Subshells, Command-Substitution (`$(...)`), Pipelines und inline `python3 -c "..."` treffen die
   Präfix-Muster ebenso wenig und sind für Routinearbeit generell zu vermeiden.
@@ -273,11 +304,123 @@ Der Unterschied zur Branch-**Erzeugung** oben ist wesentlich und der Grund, waru
 dort zwingend ist: derselbe verweigerte Schreibzugriff lässt die Erzeugung **hart fehlschlagen**,
 während er beim Löschen nur eine Warnung ist.
 
-## Mehrere Findings gleichzeitig: Worktree statt Branch-Wechsel im selben Verzeichnis
+## Mehrere Findings: bewusst sequentiell (der unterstützte Ablauf)
 
-Für **echt gleichzeitige** Arbeit an mehreren Findings (z. B. zwei P1 im selben Lauf) einen
-eigenen Worktree pro Finding-Branch verwenden, statt im Hauptverzeichnis zwischen Branches zu
-wechseln — das hält die Findings sauber getrennt.
+**Factory v1 arbeitet ein Finding nach dem anderen**, im Hauptrepository, auf einem eigenen
+Branch. Parallele Claude-Worktree-Sessions sind **nicht** Teil von v1. Das ist keine Vorliebe,
+sondern die beobachtete Folge des Control-Plane-Schutzes.
+
+### Der unterstützte Ablauf für normale P1-Arbeit
+
+Das ist der vollständige, geprüfte Weg — es gibt keinen zweiten:
+
+```
+git fetch origin
+git switch --no-track -c fix/<ID> origin/<default-branch>
+git rev-parse HEAD
+git rev-parse origin/<default-branch>
+```
+
+Die beiden SHAs müssen identisch sein, bevor irgendetwas geschrieben wird (bei Abweichung:
+`AUTONOMY_BLOCKER`). Danach im **Hauptverzeichnis** arbeiten und den Finding über den
+[`verify-finding`-Skill](.claude/skills/verify-finding/SKILL.md) bis `CLOSED` und Merge führen.
+Erst wenn dieses Finding gemergt ist, beginnt das nächste.
+
+Kommen mehrere Findings gleichzeitig herein, werden sie **nacheinander** abgearbeitet, nicht
+gleichzeitig. Ist eines blockiert (`EXPERT_REVIEW_REQUIRED`, `P0`, Governance-Entscheidung), wird
+sein Branch stehen gelassen und das nächste Finding von `origin/<default-branch>` aus begonnen —
+sequentiell heißt nicht, dass ein blockiertes Finding alles andere aufhält.
+
+### Parallelität ist als v1.x-Fähigkeit vorgemerkt
+
+Sie ist **nicht** verworfen, sondern zurückgestellt, bis sie belegbar ist. Der Weg dorthin führt
+ausdrücklich **nicht** über eine Lockerung von `permissions.deny`, `sandbox.filesystem.denyWrite`
+oder des Control-Plane-Schutzes — das wäre der Tausch einer bewiesenen Sicherheitsgrenze gegen
+eine unbewiesene Bequemlichkeit. Eine spätere v1.x müsste die Inkompatibilität an ihrer Wurzel
+lösen (etwa indem der Worktree ohne Schreibzugriff auf die Kontrollebene entsteht) und danach die
+Beobachtung unten erneut erheben.
+[`factory/guards/test_worktree_protection.py`](factory/guards/test_worktree_protection.py) zeigt
+an, wenn sich die Umgebung geändert hat.
+
+Frühere Fassungen dieses Abschnitts beschrieben Worktrees als verfügbaren Modus für „echt
+gleichzeitige" Arbeit. Der Audit hat nicht behauptet, dass das kaputt sei — er hat festgestellt,
+dass es **unbewiesen** war. Also wurde es geprüft, im echten Repository, mit dem kanonischen
+Mechanismus der Factory:
+
+```
+$ factory/scripts/create-finding-worktree.sh create <BASE_SHA> .claude/worktrees/F15-PROBE fix/F15-PROBE
+Preparing worktree (new branch 'fix/F15-PROBE')
+error: unable to create file .claude/agents/finding-closure-reviewer.md: Operation not permitted
+fatal: Could not reset index file to revision 'HEAD'.
+```
+
+Mit einem Ziel an anderer Stelle **innerhalb** des Repositories wiederholt, identisches Ergebnis.
+Einen Worktree auszuchecken heißt, jede getrackte Datei zu schreiben, und die Kontrollebene
+(`.claude/agents/**`, `.claude/hooks/**`, `factory/guards/**`, …) ist genau das, was die Sandbox
+diesem Agenten verweigert.
+
+**Der zweite Befund liegt eine Ebene tiefer.** Die `denyWrite`-Regeln einer laufenden
+Claude-Code-Session sind an **deren aktuelle Projektwurzel** gebunden (`./factory/guards`,
+`./.claude/agents`, …). Für Pfade außerhalb dieser Wurzel greifen sie nicht — positiv beobachtet,
+nicht angenommen:
+
+```
+$ touch "$TMPDIR/f15-scope-probe/factory/guards/validate-finding.py"
+AUSSERHALB DES REPOS: factory/guards BESCHREIBBAR
+$ touch "$TMPDIR/f15-scope-probe/.claude/agents/x.md"
+AUSSERHALB DES REPOS: .claude/agents BESCHREIBBAR
+```
+
+Ein Worktree **außerhalb** der Projektwurzel lässt sich deshalb anlegen — und ist **aus dieser
+Session heraus** nicht durch deren Pfadgrenzen geschützt. Diese Session könnte dort jeden Guard
+umschreiben, der sie beurteilt, und das Ergebnis in den Branch committen. Daraus folgt die
+verbindliche Regel: **eine laufende Factory-v1-Session erzeugt keinen externen Worktree und
+arbeitet nicht darin weiter.**
+
+**Was hier ausdrücklich NICHT behauptet wird:** dass eine *neu gestartete* Claude-Code-Session,
+deren eigene Projektwurzel dieser Worktree ist, keinen Schutz hätte. Das wurde nicht getestet, und
+eine ungeprüfte Aussage darüber wäre genau der Fehler, den dieses Paket beseitigt. Für Factory v1
+ist die Frage ohne Belang: v1 ist bewusst sequentiell und unterstützt Worktree-Parallelität nicht,
+also wird sie nicht untersucht.
+
+Drittens lässt sich ein einmal angelegter externer Worktree aus der erzeugenden Session **nicht
+mehr aufräumen**: `git worktree prune` scheitert mit `failed to delete '.git/worktrees/...':
+Operation not permitted`, weil `.git/` ebenfalls geschützt ist. Ein solcher Eintrag bleibt stehen.
+
+Hier funktioniert nichts falsch — die Sandbox tut genau das, wofür sie da ist, und ihre
+Wurzelbindung ist normal. Falsch war die Dokumentation, die einen Modus versprach, dessen
+Sicherheitsannahmen nie geprüft worden waren.
+
+Daraus folgt für die Praxis:
+
+- Ein Finding zur Zeit, im Hauptverzeichnis, auf `factory-change/<name>` bzw. `fix/<ID>`.
+- `create-finding-worktree.sh create` **blockiert diesen Fall aktiv, bevor** es `git worktree add`
+  überhaupt versucht: es prüft mit einer Schreibprobe auf `.claude/agents/`, ob die Kontrollebene
+  beschreibbar ist, und beendet sich bei Verweigerung sofort mit `SANDBOX_WORKTREE_INCOMPATIBLE`
+  (Exit 4). So bleibt kein halb erzeugter Worktree und kein verwaister Branch zurück, und der
+  Zustand sieht nicht wie eine vorübergehende Störung aus.
+- **Niemals `git worktree add` von Hand mit einem Ziel außerhalb der Projektwurzel.** Genau dort
+  funktioniert es — und aus der erzeugenden Session heraus ohne deren Control-Plane-Grenzen. Das
+  Skript blockiert vorher; wer es umgeht, umgeht die Kontrollebene dieser Session.
+- Die Fragen, die F-15 zum Worktree gestellt hat — ist `<worktree>/factory/reviews/` geschützt,
+  wohin schreibt der `SubagentStop`-Hook, welche Projektwurzel gilt, wie ist der Scope-Hash
+  zugeordnet — bleiben für v1 **offen und ohne Belang**: innerhalb der Projektwurzel entsteht kein
+  Worktree, in dem man sie stellen könnte, und außerhalb arbeitet v1 grundsätzlich nicht weiter.
+  Einen Worktree ohne Prüfung als „sicher" zu bezeichnen wäre genau die unbewiesene Zusicherung,
+  die dieses Paket beseitigt.
+- [`factory/guards/test_worktree_protection.py`](factory/guards/test_worktree_protection.py) hält
+  die Beobachtung fest und schlägt fehl, wenn irgendein Dokument die Parallelitätsbehauptung
+  wieder einführt.
+
+Sollte eine spätere Version parallele Findings unterstützen wollen, ist der Weg nicht, den Schutz
+zu lockern, sondern die Beobachtung neu zu erheben — der Test oben zeigt an, wenn sich die
+Umgebung geändert hat.
+
+### Der Worktree-Mechanismus selbst bleibt korrekt
+
+Die folgenden Regeln gelten unverändert für den Fall, dass Worktrees in einer anderen Umgebung
+(z. B. ohne aktive Sandbox) verwendet werden. Sie sind der Grund, warum der Mechanismus nicht
+entfernt, sondern nur als nicht-verfügbar dokumentiert wird.
 
 **Worktree-Basis: immer explizit `origin/<default-branch>`, nie EnterWorktrees impliziten
 "fresh"-Default.** EnterWorktrees `fresh`-Basis-Modus (harness-seitiger Default) löst "den
