@@ -72,6 +72,21 @@ Concretely, `Review Artifact` must satisfy all of:
 
 If the scope hash cannot be computed at all, closure is refused. An
 unknown code state must block a closure, never silently pass one.
+
+## Ambiguous metadata (final re-audit, finding A)
+
+Before any of the above is evaluated, the document must say ONE thing. A field
+name stated twice in the canonical metadata block or in `## Analyse` used to be
+resolved silently by "last wins", so
+
+    Severity: P0
+    Severity: P1
+
+parsed as P1 and the P0 hard stop did not fire. A repetition is now a hard
+failure and the guard stops there: every check below rests on the parsed
+status, severity or `Review Artifact`, and running them against an arbitrarily
+chosen one of two contradictory values would produce a verdict about a document
+that does not exist.
 """
 import re
 import subprocess
@@ -218,6 +233,13 @@ def validate_finding(parsed, finding_path):
     severity = parsed["severity"]
     fields = parsed["fields"]
 
+    errors.extend(_check_unambiguous_fields(parsed))
+    if errors:
+        # Deliberately no further checks: status, severity and Review Artifact
+        # are exactly what the rest of this guard reads, and an ambiguous
+        # document has no authoritative value for them.
+        return errors
+
     if not status:
         errors.append("Kein 'Status:'-Feld gefunden.")
         return errors
@@ -244,6 +266,30 @@ def validate_finding(parsed, finding_path):
         errors.extend(_check_required_fields(fields, REQUIRED_CLOSURE_FIELDS))
         errors.extend(_check_review_artifact(fields, finding_path, status))
 
+    return errors
+
+
+def _check_unambiguous_fields(parsed):
+    """A field stated twice makes the document ambiguous, not overridden.
+
+    Applies to every field name, not to a curated list of security-relevant
+    ones: such a list would have to be kept in step with the guard's required
+    fields, and a second, silently diverging list is exactly what audit finding
+    F-18 removed from this codebase. `Status`, `Severity` and `Review Artifact`
+    are merely the cases where the consequence is worst.
+    """
+    errors = []
+    for names, where in (
+        (parsed.get("duplicate_metadata_fields") or [], "kanonischen Metadatenblock"),
+        (parsed.get("duplicate_analysis_fields") or [], "Abschnitt '## Analyse'"),
+    ):
+        for name in names:
+            errors.append(
+                f"Feld '{name}' ist im {where} mehrfach angegeben. Mehrdeutige "
+                "Metadaten werden nicht aufgeloest ('der letzte gewinnt' waere "
+                "eine Entscheidung, fuer die es keine Grundlage gibt): das Feld "
+                "genau einmal angeben."
+            )
     return errors
 
 

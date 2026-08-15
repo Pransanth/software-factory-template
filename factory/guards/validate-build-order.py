@@ -185,6 +185,18 @@ def read_title_id(text):
     return None
 
 
+def read_finding_ambiguous_metadata(finding_path):
+    """Field names stated twice in the finding's canonical metadata block.
+
+    The evidence lifecycle below is driven entirely by the finding's status, so
+    a finding that states `Status:` twice does not have one status this guard
+    could act on. Read separately from read_finding_status() rather than folded
+    into it, so that function keeps its single, obvious return value.
+    """
+    text = finding_path.read_text(encoding="utf-8")
+    return parse_finding(text)["duplicate_metadata_fields"]
+
+
 def read_finding_status(finding_path):
     """The finding's Status value, or None if it has none.
 
@@ -312,6 +324,17 @@ def validate_build_order(path, repo_root=REPO_ROOT):
         errors.extend(_section_problems(name, sections[key]))
 
     # 5. evidence per lifecycle
+    ambiguous = read_finding_ambiguous_metadata(finding_path)
+    if ambiguous:
+        errors.append(
+            f"Finding '{finding_id}' gibt "
+            + ", ".join(f"'{name}'" for name in ambiguous)
+            + " im kanonischen Metadatenblock mehrfach an. Damit ist der Status "
+            "mehrdeutig, und welche Evidence dieser Bauauftrag tragen muss, ist "
+            "nicht bestimmbar."
+        )
+        return errors
+
     status = read_finding_status(finding_path)
     if status is None:
         errors.append(

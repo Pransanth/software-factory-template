@@ -75,12 +75,136 @@ REPO_ROOT = GUARDS_DIR.parents[1]
 SETTINGS = REPO_ROOT / ".claude" / "settings.json"
 WORKTREE_SCRIPT = REPO_ROOT / "factory" / "scripts" / "create-finding-worktree.sh"
 
-# Phrases that would re-introduce the unproven claim. Deliberately narrow: the
-# documentation must be able to DISCUSS parallelism in order to rule it out.
-PARALLELISM_CLAIM_RE = re.compile(
-    r"(parallel\s+sicher|sicher\s+parallel|parallele\s+Claude-Worktree-Sessions\s+"
-    r"(?:sind|werden)\s+unterstuetzt)",
+# --- The documentation check (final re-audit, finding B) --------------------
+#
+# The first version of this check listed three literal phrases:
+#
+#     parallel\s+sicher | sicher\s+parallel |
+#     parallele\s+Claude-Worktree-Sessions\s+(sind|werden)\s+unterstuetzt
+#
+# The independent review of FACTORY-REAL-PROJECT-READINESS-1 pointed out that
+# this matched neither the FORMER wording it was supposed to prevent ("Fuer echt
+# gleichzeitige Arbeit ... einen eigenen Worktree pro Finding-Branch verwenden")
+# nor the umlaut spelling this repository actually writes ("unterstuetzt" with
+# "ue" only, never "unterstützt"). Observed against the unmodified regex, all
+# nine of the formulations in POSITIVE_CORPUS below went undetected.
+#
+# The check is now built the other way round, which is the only way to get
+# usable coverage without pretending to understand German:
+#
+#   * A sentence that mentions parallel or simultaneous work MUST also rule it
+#     out. Documentation has to be able to discuss parallelism -- every current
+#     paragraph does exactly that -- so the term alone cannot be the signal.
+#   * The signal is a sentence with a parallelism term and no ruling-out marker.
+#     That is a formulation check, not language understanding: it is minimally
+#     robust against the spellings actually used here, and it does not claim to
+#     catch every conceivable paraphrase.
+#
+# Deliberately NOT scanned: factory/findings/**, the individual build orders and
+# factory/reviews/**. Those quote the historical claim as evidence of what was
+# repaired; rewriting history to satisfy a text check would be the opposite of
+# what this factory is for.
+
+PARALLELISM_TERM_RE = re.compile(
+    r"(parallel|gleichzeitig|nebenl(?:ä|ae)ufig)",
     re.IGNORECASE,
+)
+
+# Markers that turn a mention into a rejection. Kept small and concrete: each
+# one occurs in a real sentence of this repository's documentation.
+RULED_OUT_RE = re.compile(
+    r"(nicht|kein|niemals|nirgend|ausschlie(?:ß|ss)|ausgeschlossen|unbewiesen|"
+    r"zur(?:ü|ue)ckgestellt|vorgemerkt|v1\.x|fr(?:ü|ue)her|nacheinander)",
+    re.IGNORECASE,
+)
+
+FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
+LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]\s|\d+\.\s)")
+
+
+def _sentences(text):
+    """Split markdown prose into sentence-sized units.
+
+    Line wrapping is undone inside a paragraph -- otherwise a hard wrap could
+    separate a claim from the `nicht` that rules it out, and the check would
+    fire on a correct document. Headings and list items start their own unit so
+    a negation cannot leak across an unrelated bullet. Fenced blocks are dropped
+    entirely: a quoted command output is not a claim.
+    """
+    lines = []
+    in_fence = False
+    for line in text.splitlines():
+        if FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines.append(line)
+
+    blocks = []
+    current = []
+    for line in lines:
+        starts_block = (
+            not line.strip()
+            or line.lstrip().startswith("#")
+            or LIST_ITEM_RE.match(line)
+        )
+        if starts_block:
+            if current:
+                blocks.append(" ".join(current))
+                current = []
+            if line.strip():
+                current = [line.strip()]
+            continue
+        current.append(line.strip())
+    if current:
+        blocks.append(" ".join(current))
+
+    sentences = []
+    for block in blocks:
+        sentences.extend(s for s in re.split(r"(?<=[.!?])\s+", block) if s.strip())
+    return sentences
+
+
+def unruled_parallelism_claims(text):
+    """Sentences that mention parallelism without ruling it out."""
+    return [
+        sentence
+        for sentence in _sentences(text)
+        if PARALLELISM_TERM_RE.search(sentence)
+        and not RULED_OUT_RE.search(sentence)
+    ]
+
+
+# Formulations that MUST be detected. The first is the wording an earlier
+# revision of CLAUDE.md actually carried; the rest are the spellings named in
+# the re-audit brief (parallel, Parallelitaet, parallele Findings,
+# Worktree-Parallelitaet) in both umlaut and ae/ue spelling.
+POSITIVE_CORPUS = (
+    "Für echt gleichzeitige Arbeit sollte man einen eigenen Worktree pro "
+    "Finding-Branch verwenden.",
+    "Parallele Claude-Worktree-Sessions sind unterstützt.",
+    "Parallele Claude-Worktree-Sessions werden unterstuetzt.",
+    "Worktree-Parallelität ist verfügbar und erprobt.",
+    "Worktree-Parallelitaet ist verfuegbar und erprobt.",
+    "Parallele Findings sind möglich.",
+    "Mehrere Findings können parallel bearbeitet werden.",
+    "Parallelitaet ist sicher.",
+    "Die Factory unterstützt parallel laufende Worktrees.",
+    "Nebenläufige Finding-Sessions werden empfohlen.",
+)
+
+# Formulations that must NOT be flagged -- the documentation has to stay able to
+# rule parallelism out in the wordings it really uses.
+NEGATIVE_CORPUS = (
+    "Parallele Claude-Worktree-Sessions sind nicht Teil von v1.",
+    "Kommen mehrere Findings gleichzeitig herein, werden sie nacheinander "
+    "abgearbeitet, nicht gleichzeitig.",
+    "Parallelität ist als v1.x-Fähigkeit vorgemerkt.",
+    "Frühere Fassungen dieses Abschnitts beschrieben Worktrees als verfügbaren "
+    "Modus für echt gleichzeitige Arbeit.",
+    "v1 ist bewusst sequentiell und unterstützt Worktree-Parallelität nicht.",
+    "Sollte eine spätere Version parallele Findings unterstützen wollen, ist der "
+    "Weg nicht, den Schutz zu lockern.",
 )
 
 
@@ -100,12 +224,78 @@ class DocumentationTests(unittest.TestCase):
             if not path.is_file():
                 continue
             with self.subTest(document=relative):
-                text = path.read_text(encoding="utf-8")
-                match = PARALLELISM_CLAIM_RE.search(text)
-                self.assertIsNone(
-                    match,
-                    f"{relative} behauptet Parallelitaet: "
-                    f"{match.group(0) if match else ''}",
+                claims = unruled_parallelism_claims(
+                    path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    claims,
+                    [],
+                    f"{relative} erwaehnt Parallelitaet, ohne sie im selben Satz "
+                    f"auszuschliessen: {claims}",
+                )
+
+    def test_the_check_detects_the_formulations_actually_used(self):
+        """The gap the final re-audit closed: the old regex found none of these."""
+        for sentence in POSITIVE_CORPUS:
+            with self.subTest(sentence=sentence):
+                self.assertNotEqual(
+                    unruled_parallelism_claims(sentence),
+                    [],
+                    "Diese Parallelitaetsbehauptung wird nicht erkannt",
+                )
+
+    def test_the_check_leaves_rejecting_sentences_alone(self):
+        """Ruling parallelism out must stay sayable in the wordings used here."""
+        for sentence in NEGATIVE_CORPUS:
+            with self.subTest(sentence=sentence):
+                self.assertEqual(
+                    unruled_parallelism_claims(sentence),
+                    [],
+                    "Ein Satz, der Parallelitaet ausschliesst, wurde als "
+                    "Behauptung gemeldet",
+                )
+
+    def test_a_quoted_claim_in_a_fenced_block_is_not_a_claim(self):
+        """Evidence quotes the old wording; quoting is not asserting."""
+        text = (
+            "Die frühere Fassung lautete:\n\n"
+            "```\nParallele Claude-Worktree-Sessions sind unterstützt.\n```\n"
+        )
+        self.assertEqual(unruled_parallelism_claims(text), [])
+
+    def test_a_hard_wrapped_rejection_is_not_flagged(self):
+        """A negation split across a wrapped line still belongs to the sentence."""
+        text = (
+            "Parallele Claude-Worktree-Sessions sind **nicht**\n"
+            "Teil von v1.\n"
+        )
+        self.assertEqual(unruled_parallelism_claims(text), [])
+
+    def test_claude_md_does_not_promise_more_than_the_check_delivers(self):
+        """The review objection this closes: CLAUDE.md said the test fails if
+        ANY document re-introduces the claim -- more than a formulation check
+        can deliver."""
+        text = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertNotIn("wenn irgendein Dokument die Parallelitätsbehauptung", text)
+        self.assertIn("Formulierungsprüfung", text)
+
+    def test_a_finding_worktree_is_not_advertised_as_routine(self):
+        """ONBOARDING.md listed creating a finding worktree among the steps that
+        run without an approval prompt. Under F-15/B that call cannot succeed in
+        a sandboxed session, so listing it described a mode v1 does not have."""
+        text = (REPO_ROOT / "factory" / "ONBOARDING.md").read_text(encoding="utf-8")
+        marker = text.find("ZERO_ROUTINE_APPROVALS")
+        self.assertNotEqual(marker, -1, "ZERO_ROUTINE_APPROVALS-Abschnitt fehlt")
+        rest = text[marker:]
+        end = rest.find("\n## ", 1)
+        section = rest if end == -1 else rest[:end]
+        for advertised in ("Finding-Worktree", "create-finding-worktree.sh"):
+            with self.subTest(entry=advertised):
+                self.assertNotIn(
+                    advertised,
+                    section,
+                    "Die ZERO_ROUTINE_APPROVALS-Liste fuehrt den Worktree-Pfad "
+                    "als Routine auf, obwohl Factory v1 ihn nicht unterstuetzt",
                 )
 
     def test_the_sequential_decision_is_documented(self):

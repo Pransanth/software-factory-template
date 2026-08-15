@@ -412,8 +412,14 @@ Daraus folgt für die Praxis:
   Einen Worktree ohne Prüfung als „sicher" zu bezeichnen wäre genau die unbewiesene Zusicherung,
   die dieses Paket beseitigt.
 - [`factory/guards/test_worktree_protection.py`](factory/guards/test_worktree_protection.py) hält
-  die Beobachtung fest und schlägt fehl, wenn irgendein Dokument die Parallelitätsbehauptung
-  wieder einführt.
+  die Beobachtung fest und prüft die zentralen Dokumente mechanisch: erwähnt ein Satz Parallelität
+  oder gleichzeitige Arbeit, muss derselbe Satz sie ausschließen, sonst schlägt der Test fehl. Das
+  ist eine Formulierungsprüfung, kein Sprachverständnis — sie erkennt die tatsächlich verwendeten
+  Schreibweisen (parallel, Parallelität, parallele Findings, Worktree-Parallelität, gleichzeitig,
+  jeweils in beiden Umlautschreibungen), nicht jede denkbare Umschreibung. Geprüft werden
+  `CLAUDE.md`, `.claude/rules/factory-workflow.md`, `factory/README.md` und
+  `factory/ONBOARDING.md`; ausdrücklich nicht die Findings, Bauaufträge und Reviews, die die
+  frühere Fassung als Evidence zitieren.
 
 Sollte eine spätere Version parallele Findings unterstützen wollen, ist der Weg nicht, den Schutz
 zu lockern, sondern die Beobachtung neu zu erheben — der Test oben zeigt an, wenn sich die
