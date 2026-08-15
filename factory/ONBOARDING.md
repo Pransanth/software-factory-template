@@ -94,8 +94,9 @@ Nach jedem dieser Schritte: **Preflight erneut ausführen**, bis `FACTORY_PREFLI
 Ist der Preflight grün, läuft die normale Finding-Arbeit unbeaufsichtigt durch:
 
 - Finding anlegen/aktualisieren, Bauauftrag schreiben
-- Finding-Branch (`git switch --no-track -c … origin/<default-branch>`) bzw. Finding-Worktree
-  über `create-finding-worktree.sh`
+- Finding-Branch (`git switch --no-track -c … origin/<default-branch>`) im Hauptrepository —
+  Factory v1 arbeitet sequentiell (Audit-Befund F-15), ein eigener Worktree je Finding gehört
+  nicht zur unterstützten Routine
 - Regressionstest zuerst rot, dann Fix, dann grün
 - Guards und kanonischer Runner (`run-factory-checks.py`), Projekttests
   (`run-project-tests.py`)

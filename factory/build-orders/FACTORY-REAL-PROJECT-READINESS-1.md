@@ -122,12 +122,25 @@ Inhaltlich sind alle neun Folgeänderungen dieses Pakets und ausschließlich ver
   Produktcode anlegt, um eine `project-tests.conf`. Keine Assertion wurde gelockert, kein Testfall
   entfernt, keine Prüfung deaktiviert.
 
-Alles andere bleibt out of scope. `factory/reviews/**` wird nicht angefasst — Review-Runden sind
-append-only und entstehen ausschließlich durch den `SubagentStop`-Hook. Die bereits geschlossenen
-Findings `FACTORY-TRUST-CORE-1` und `FACTORY-OPS-ROBUSTNESS-1` und ihre Bauaufträge werden nicht
-verändert; sie dienen als Regressionskorpus.
+**Nachtrag zu `factory-preflight.sh` — nachgetragen im finalen Re-Audit (Punkt C).** Die
+Begründung eine Zeile höher nennt nur die neuen Pflichtdateien und lässt die zweite, ebenso
+sicherheitsrelevante Hälfte derselben Änderung unerwähnt: aus der `required`-Liste des Preflights
+— der Liste, die [`factory/ONBOARDING.md`](../ONBOARDING.md) als **ZERO_ROUTINE_APPROVALS**
+beschreibt — wurde der Eintrag `Bash(git worktree *)` **entfernt**. Der Grund ist F-15/Ergebnis B:
+Factory v1 unterstützt worktree-basierte Parallelität bewusst nicht, die unterstützte Routine
+setzt selbst kein `git worktree` ab, und `create-finding-worktree.sh` läuft als ein einziger
+allowlisteter Aufruf, dessen Interna keine eigene Freigabe brauchen. Eine Routine-Freigabe für
+genau den Modus zu verlangen, den v1 ausschließt, wäre widersprüchlich.
 
-Alles andere ist out of scope. `factory/reviews/**` wird nicht angefasst — Review-Runden sind
+Die Änderung ist **verschärfend, nicht lockernd**: weil `known` aus `required` abgeleitet wird,
+meldet der Preflight eine trotzdem erteilte `Bash(git worktree *)`-Freigabe seither als `UNKNOWN`
+und endet `BLOCKED`. Gepinnt ist das durch
+`test_raw_git_worktree_is_not_a_required_routine_grant` in
+[`factory/guards/test_worktree_protection.py`](../guards/test_worktree_protection.py).
+Nachgetragen wird hier ausschließlich die fehlende Begründung — die Evidence-Abschnitte unten
+bleiben unverändert.
+
+Alles andere bleibt out of scope. `factory/reviews/**` wird nicht angefasst — Review-Runden sind
 append-only und entstehen ausschließlich durch den `SubagentStop`-Hook. Die bereits geschlossenen
 Findings `FACTORY-TRUST-CORE-1` und `FACTORY-OPS-ROBUSTNESS-1` und ihre Bauaufträge werden nicht
 verändert; sie dienen als Regressionskorpus.
