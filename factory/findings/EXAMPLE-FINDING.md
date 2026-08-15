@@ -1,6 +1,7 @@
 # EXAMPLE-FINDING
 
 Status: OPEN
+Severity: P2
 
 ## Befund
 
@@ -33,8 +34,14 @@ What An Expert Would Need To Review: Not yet analyzed
 
 - `Status:` ist der einzige Zustandsträger; erlaubte Werte und ihre Pflichtfelder stehen in
   [`.claude/rules/factory-workflow.md`](../../.claude/rules/factory-workflow.md).
+- `Severity:` ist ab `ANALYZED` Pflicht und einer von `P0`, `P1`, `P2`, `P3`. Ein `P0` darf
+  ausschließlich `OPEN`, `ANALYZED` oder `EXPERT_REVIEW_REQUIRED` erreichen — der Guard lehnt
+  jeden weiteren Status ab.
 - Bei `OPEN` dürfen die Analysefelder `Not yet analyzed` bleiben. Ab `ANALYZED` müssen die acht
   Analysefelder echt gefüllt sein, für `READY_FOR_CLOSURE`/`CLOSED` zusätzlich
   `Verification Evidence`, `CI Evidence` und `Review Artifact`.
+- `Review Artifact` muss exakt `factory/reviews/<Finding-ID>.round-<N>.md` sein — das eigene,
+  neueste Review-Artefakt dieses Findings. Fremde Pfade, andere Findings und ältere Runden
+  werden abgelehnt.
 - Ein Feld pro Zeile, `Feldname: Wert`. Platzhalter wie `TBD`, `TODO`, `N/A` gelten dem Guard
   nicht als ausgefüllt.

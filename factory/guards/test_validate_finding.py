@@ -8,6 +8,22 @@ cannot be imported as a normal Python module. Instead these tests invoke it
 the same way any real user (or a future hook/CI job) would: as a
 subprocess, checking exit code and printed messages. This also doubles as
 an end-to-end check of the CLI itself, not just internal functions.
+
+## Note on the closure-gate tests below
+
+An earlier version of this file asserted that a "Review Artifact" pointing
+at an ABSOLUTE path outside factory/reviews/ was ACCEPTED, and used that to
+test the closure gate conveniently without touching the real reviews
+directory. The factory audit (finding F-01) showed that this was not a test
+convenience but the bug itself: any file containing a "Result: PASS" line
+could close a finding, so the independent reviewer could be bypassed
+entirely while every automated layer reported green.
+
+Those assertions are therefore deliberately INVERTED here: a foreign path
+must now be rejected. The positive closure path needs a real repository
+(the scope hash is computed from tracked files), so it lives in
+factory/guards/test_trust_core.py, which builds a throwaway git project for
+exactly that purpose.
 """
 import subprocess
 import sys
@@ -52,6 +68,7 @@ ANALYZED_MISSING_FIELDS = """\
 # TEST-3
 
 Status: ANALYZED
+Severity: P1
 
 ## Befund
 
@@ -69,6 +86,7 @@ VALID_ANALYZED = """\
 # TEST-4
 
 Status: ANALYZED
+Severity: P1
 
 ## Befund
 
@@ -90,6 +108,7 @@ VALID_EXPERT_REVIEW = """\
 # TEST-5
 
 Status: EXPERT_REVIEW_REQUIRED
+Severity: P1
 
 ## Befund
 
@@ -118,6 +137,7 @@ INVALID_EXPERT_REVIEW_MISSING_REASON = """\
 # TEST-6
 
 Status: EXPERT_REVIEW_REQUIRED
+Severity: P1
 
 ## Befund
 
@@ -145,6 +165,7 @@ FINDING_TEMPLATE_WITH_CLOSURE = """\
 # TEST-CLOSURE
 
 Status: {status}
+Severity: P1
 
 ## Befund
 
@@ -167,7 +188,10 @@ REVIEW_TEMPLATE = """\
 
 Finding: TEST-CLOSURE
 Reviewer: test-reviewer
+Reviewer Agent Type: finding-closure-reviewer
+Reviewer Agent ID: agent-test-0001
 Reviewed Commit: abc123
+Reviewed Scope Hash: sha256:{hash_body}
 Result: {result}
 Root Cause Addressed: Ja, siehe Analyse.
 Regression Evidence Checked: Regressionstest gegengeprueft.
@@ -178,13 +202,17 @@ Findings And Objections: Keine.
 """
 
 
+def _write_temp_file(content, suffix=".md"):
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=suffix, delete=False, encoding="utf-8"
+    ) as handle:
+        handle.write(content)
+        return handle.name
+
+
 class ValidateFindingTests(unittest.TestCase):
     def run_guard(self, content):
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", delete=False, encoding="utf-8"
-        ) as handle:
-            handle.write(content)
-            temp_path = handle.name
+        temp_path = _write_temp_file(content)
         try:
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), temp_path],
@@ -234,23 +262,21 @@ class ValidateFindingTests(unittest.TestCase):
         self.assertIn("What An Expert Would Need To Review", result.stderr)
         self.assertIn("Risk Assessment", result.stderr)
 
-
-def _write_temp_file(content, suffix=".md"):
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=suffix, delete=False, encoding="utf-8"
-    ) as handle:
-        handle.write(content)
-        return handle.name
+    def test_analyzed_without_severity_is_rejected(self):
+        result = self.run_guard(VALID_ANALYZED.replace("Severity: P1\n", ""))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Severity", result.stderr)
 
 
 class ValidateFindingClosureGateTests(unittest.TestCase):
-    """Closure gate: READY_FOR_CLOSURE and CLOSED additionally require
-    Verification Evidence, CI Evidence and a Review Artifact whose
-    Result is PASS. Review artifact fixtures use an ABSOLUTE path in the
-    "Review Artifact:" field so these tests never touch the real
-    factory/reviews/ directory -- validate-finding.py resolves a
-    relative path against the real repo root, but leaves an absolute
-    path untouched."""
+    """Closure gate: a finding may only close on ITS OWN canonical review.
+
+    Every test here asserts a rejection. That is the inversion described in
+    this module's docstring: the pre-repair guard accepted all of these,
+    which is what made the independent reviewer bypassable. The accepting
+    counterpart -- a correctly bound closure -- needs a real git repository
+    and lives in test_trust_core.py.
+    """
 
     def setUp(self):
         self._temp_files = []
@@ -260,8 +286,8 @@ class ValidateFindingClosureGateTests(unittest.TestCase):
         for path in self._temp_files:
             Path(path).unlink(missing_ok=True)
 
-    def write_review(self, result):
-        path = _write_temp_file(REVIEW_TEMPLATE.format(result=result))
+    def write_review(self, result, hash_body="0" * 64):
+        path = _write_temp_file(REVIEW_TEMPLATE.format(result=result, hash_body=hash_body))
         self._temp_files.append(path)
         return path
 
@@ -280,7 +306,7 @@ class ValidateFindingClosureGateTests(unittest.TestCase):
     def full_evidence_fields(self, review_path):
         return (
             "Verification Evidence: Regressionstest gruen, relevante App-Tests gruen.\n"
-            "CI Evidence: GitHub Actions Run #123 auf main, gruen.\n"
+            "CI Evidence: GitHub Actions Run 123 auf dem Finding-Branch, conclusion success.\n"
             f"Review Artifact: {review_path}\n"
         )
 
@@ -299,26 +325,31 @@ class ValidateFindingClosureGateTests(unittest.TestCase):
         self.assertIn("CI Evidence", result.stderr)
         self.assertIn("Review Artifact", result.stderr)
 
+    def test_absolute_foreign_review_path_is_rejected_even_with_result_pass(self):
+        """INVERTED (audit F-01): this used to be the accepted happy path."""
+        review_path = self.write_review("PASS")
+        finding_path = self.write_finding(
+            "READY_FOR_CLOSURE", self.full_evidence_fields(review_path)
+        )
+        result = self.run_guard_on(finding_path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("Review Artifact", result.stderr)
+        self.assertIn("kanonische", result.stderr)
+
+    def test_closed_with_absolute_foreign_review_path_is_rejected(self):
+        """INVERTED (audit F-01)."""
+        review_path = self.write_review("PASS")
+        finding_path = self.write_finding("CLOSED", self.full_evidence_fields(review_path))
+        result = self.run_guard_on(finding_path)
+        self.assertEqual(result.returncode, 1, result.stdout)
+
     def test_ready_for_closure_with_review_fail_is_rejected(self):
         review_path = self.write_review("FAIL")
-        finding_path = self.write_finding("READY_FOR_CLOSURE", self.full_evidence_fields(review_path))
+        finding_path = self.write_finding(
+            "READY_FOR_CLOSURE", self.full_evidence_fields(review_path)
+        )
         result = self.run_guard_on(finding_path)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Result 'FAIL'", result.stderr)
-
-    def test_ready_for_closure_is_blocked_when_review_result_is_expert_review_required(self):
-        review_path = self.write_review("EXPERT_REVIEW_REQUIRED")
-        finding_path = self.write_finding("READY_FOR_CLOSURE", self.full_evidence_fields(review_path))
-        result = self.run_guard_on(finding_path)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("EXPERT_REVIEW_REQUIRED", result.stderr)
-
-    def test_ready_for_closure_with_review_pass_and_full_evidence_is_accepted(self):
-        review_path = self.write_review("PASS")
-        finding_path = self.write_finding("READY_FOR_CLOSURE", self.full_evidence_fields(review_path))
-        result = self.run_guard_on(finding_path)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("GÜLTIG", result.stdout)
 
     def test_closed_without_full_evidence_is_rejected(self):
         finding_path = self.write_finding("CLOSED", "")
@@ -326,23 +357,26 @@ class ValidateFindingClosureGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Review Artifact", result.stderr)
 
-    def test_closed_with_full_evidence_and_review_pass_is_accepted(self):
-        review_path = self.write_review("PASS")
-        finding_path = self.write_finding("CLOSED", self.full_evidence_fields(review_path))
-        result = self.run_guard_on(finding_path)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("GÜLTIG", result.stdout)
-
     def test_review_artifact_pointing_at_missing_file_is_rejected(self):
         extra = (
             "Verification Evidence: Alle Tests gruen.\n"
-            "CI Evidence: GitHub Actions Run #123, gruen.\n"
+            "CI Evidence: GitHub Actions Run 123, conclusion success.\n"
             "Review Artifact: /nonexistent/path/to/review-does-not-exist.md\n"
         )
         finding_path = self.write_finding("READY_FOR_CLOSURE", extra)
         result = self.run_guard_on(finding_path)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("existiert", result.stderr)
+
+    def test_relative_path_outside_reviews_is_rejected(self):
+        extra = (
+            "Verification Evidence: Alle Tests gruen.\n"
+            "CI Evidence: GitHub Actions Run 123, conclusion success.\n"
+            "Review Artifact: factory/build-orders/TEST-CLOSURE.md\n"
+        )
+        finding_path = self.write_finding("READY_FOR_CLOSURE", extra)
+        result = self.run_guard_on(finding_path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("kanonische", result.stderr)
 
 
 if __name__ == "__main__":

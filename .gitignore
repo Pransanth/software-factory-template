@@ -6,3 +6,12 @@
 # Finding-Worktrees (siehe factory/scripts/create-finding-worktree.sh) sind
 # lokale Arbeitskopien, kein Teil der Vorlage.
 .claude/worktrees/
+
+# Python-Bytecode. Nicht nur Hygiene: der Scope-Hash
+# (factory/guards/scope_hash.py) laeuft ueber alle *getrackten* Dateien. Wuerde
+# ein 'git add -A' erzeugten Bytecode mit aufnehmen, aenderte sich der Hash
+# ohne jede inhaltliche Aenderung -- und ein gerade erteiltes Review-PASS
+# waere sofort ungueltig. Bytecode entsteht ausserdem versionsspezifisch
+# (cpython-311 vs. cpython-39), also je nach Maschine unterschiedlich.
+__pycache__/
+*.py[cod]

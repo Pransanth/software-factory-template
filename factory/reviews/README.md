@@ -1,7 +1,7 @@
 # Review-Artefakte
 
-Dieses Verzeichnis enthält die Ergebnisse unabhängiger Closure-Reviews für Findings, jeweils
-eine Datei pro Finding: `factory/reviews/<Finding-ID>.md`.
+Dieses Verzeichnis enthält die Ergebnisse unabhängiger Closure-Reviews für Findings — eine Datei
+pro **Review-Runde**: `factory/reviews/<Finding-ID>.round-<N>.md`.
 
 Ein Review-Artefakt wird vom `finding-closure-reviewer`-Subagenten erzeugt (siehe
 [`.claude/agents/finding-closure-reviewer.md`](../../.claude/agents/finding-closure-reviewer.md))
@@ -10,6 +10,21 @@ angestoßen. Es wird strukturell geprüft von
 [`factory/guards/validate-review.py`](../guards/validate-review.py) und ist Teil des kanonischen
 Runners (`python3 factory/guards/run-factory-checks.py`). Diese README-Datei selbst ist **kein**
 Review-Artefakt und wird vom Guard ausdrücklich übersprungen.
+
+## Runden sind append-only
+
+Eine neue Review-Runde überschreibt **nie** eine frühere. Der Hook vergibt immer die nächste
+freie Nummer. Damit bleibt ein `FAIL` dauerhaft auf dem Papier, auch wenn eine spätere Runde
+`PASS` ergibt.
+
+Vorher überschrieb jede Runde die vorherige. Das hieß: Reviewer fragen, `FAIL` bekommen, ohne
+jede Änderung erneut fragen — und irgendwann steht ein sauberes `PASS` da, ohne Spur davon, dass
+es je anders war. Bei einem stochastischen Reviewer ist das kein theoretischer Fall, sondern
+schlicht eine Frage der Wiederholungen. Deshalb gilt jetzt zusätzlich:
+
+**Ein `PASS` ist ungültig, wenn eine frühere Runde denselben `Reviewed Scope Hash` mit einem
+anderen Ergebnis trägt.** Der legitime Weg nach einem `FAIL` ist: reparieren (das ändert den
+Scope-Hash), dann neu reviewen.
 
 ## Wie diese Datei tatsächlich entsteht
 
@@ -22,6 +37,16 @@ tatsächlich bereitgestellten Ereignisdaten — `agent_type`, `agent_id`, `last_
 direkt aus. Der **implementierende Haupt-Agent transkribiert das Reviewer-Ergebnis nicht selbst**:
 Er stößt den Reviewer über das Agent-Tool an und liest anschließend nur noch das vom Hook
 erzeugte Artefakt.
+
+Drei Felder stammen **nie** aus dem Text des Reviewers und nie von Hand — nur der Hook setzt sie:
+
+- `Reviewer Agent Type` und `Reviewer Agent ID` aus den echten Ereignisdaten des Laufs.
+- `Reviewed Scope Hash` aus dem tatsächlichen Repository-Zustand in dem Moment, in dem der
+  Reviewer fertig war (siehe [`factory/guards/scope_hash.py`](../guards/scope_hash.py)).
+
+Kann der Scope-Hash nicht bestimmt werden, schreibt der Hook **kein** Artefakt. Ein Review, das
+sich keinem Codezustand zuordnen lässt, wäre von einem gültigen nicht zu unterscheiden — das
+wäre schlechter als gar keines.
 
 Zusätzlich ist `factory/reviews/` in `.claude/settings.json` per `permissions.deny` für die
 Werkzeuge `Edit` und `Write` gesperrt und per `sandbox.filesystem.denyWrite` auch für
@@ -46,11 +71,12 @@ Plain-Text-Felder, ein Feld pro Zeile — dieselbe Konvention wie bei den Findin
 ```
 # <Finding-ID>
 
-Finding: <Finding-ID>
+Finding: <Finding-ID, identisch mit dem Dateinamen>
 Reviewer: <wer/was den Review durchgeführt hat>
 Reviewer Agent Type: <agent_type aus dem SubagentStop-Event, nur vom Hook gesetzt>
 Reviewer Agent ID: <agent_id aus dem SubagentStop-Event, nur vom Hook gesetzt>
 Reviewed Commit: <Commit-Hash / Branch, oder Beschreibung der geprüften Diff-Basis>
+Reviewed Scope Hash: sha256:<64 Hex-Zeichen>, nur vom Hook gesetzt
 Result: PASS | FAIL | EXPERT_REVIEW_REQUIRED
 Root Cause Addressed: <ja/nein + Begründung>
 Regression Evidence Checked: <was geprüft wurde, und wie>
@@ -60,25 +86,32 @@ Remaining Risks: <verbleibende Risiken, oder "Keine">
 Findings And Objections: <konkrete Einwände, oder "Keine">
 ```
 
-Alle zwölf Felder sind Pflichtfelder (nicht leer, kein Platzhalter wie `TBD`); `Result` muss
-exakt einer der drei genannten Werte sein; `Reviewer Agent Type` muss exakt
-`finding-closure-reviewer` sein, der einzige gültige Reviewer-Agent-Typ. `Finding` muss
-auf eine tatsächlich existierende Datei unter `factory/findings/` verweisen. `Reviewer Agent
-Type` und `Reviewer Agent ID` stammen nie aus dem Text des Reviewer-Subagenten selbst und nie von
-Hand — nur der Hook setzt sie, aus den echten Ereignisdaten.
+Alle dreizehn Felder sind Pflichtfelder (nicht leer, kein Platzhalter wie `TBD`), und jedes Feld
+darf **höchstens einmal** vorkommen — zwei `Result`-Zeilen würden die Bedeutung von der
+Parser-Reihenfolge abhängig machen. `Result` muss exakt einer der drei genannten Werte sein;
+`Reviewer Agent Type` muss exakt `finding-closure-reviewer` sein, der einzige gültige
+Reviewer-Agent-Typ. `Finding` muss mit der Finding-ID im Dateinamen übereinstimmen **und** auf
+eine tatsächlich existierende Datei unter `factory/findings/` verweisen.
 
 ## Was der Guard prüft — und was nicht
 
-`validate-review.py` prüft ausschließlich Struktur: sind alle Felder ausgefüllt, ist `Result`
-ein gültiger Wert, ist `Reviewer Agent Type` der eine gültige Reviewer-Agent-Typ, existiert das
-referenzierte Finding. Er bewertet **nicht**, ob der Inhalt inhaltlich zutrifft — ob die Root
-Cause wirklich behoben ist, ob die Regressionsbeweise überzeugend sind, ob es übersehene
-Umgehungswege gibt. Diese inhaltliche Bewertung liefert ausschließlich der unabhängige Reviewer;
-ein einfacher Python-Validator kann und soll sie nicht ersetzen. Er kann auch `Reviewer Agent ID`
-nicht gegen ein Register gültiger IDs prüfen (ein solches Register existiert nicht) — er verlangt
-dort nur einen vorhandenen, nicht-platzhalterhaften Wert.
+`validate-review.py` prüft ausschließlich Struktur: kanonischer Rundenname, alle Felder
+ausgefüllt und eindeutig, `Result` ein gültiger Wert, `Reviewer Agent Type` der eine gültige
+Typ, `Reviewed Scope Hash` wohlgeformt, Finding-ID konsistent und existent. Er bewertet **nicht**,
+ob der Inhalt inhaltlich zutrifft — ob die Root Cause wirklich behoben ist, ob die
+Regressionsbeweise überzeugen, ob es übersehene Umgehungswege gibt. Diese inhaltliche Bewertung
+liefert ausschließlich der unabhängige Reviewer; ein einfacher Python-Validator kann und soll sie
+nicht ersetzen. Er kann auch `Reviewer Agent ID` nicht gegen ein Register gültiger IDs prüfen
+(ein solches Register existiert nicht) — er verlangt dort nur einen vorhandenen,
+nicht-platzhalterhaften Wert.
 
-Ein Finding kann `READY_FOR_CLOSURE` oder `CLOSED` nur erreichen, wenn sein `Review Artifact`-Feld
-auf eine hier gültige Datei mit `Result: PASS` verweist — geprüft von
-[`factory/guards/validate-finding.py`](../guards/validate-finding.py). `Result: FAIL` oder
-`Result: EXPERT_REVIEW_REQUIRED` blockieren das technisch.
+Ob der Scope-Hash noch **passt**, prüft nicht dieser Guard, sondern
+[`validate-finding.py`](../guards/validate-finding.py) beim Closure: ein Review-Artefakt ist als
+Momentaufnahme auch dann strukturell gültig, wenn der Code inzwischen weitergelaufen ist — es
+taugt dann nur nicht mehr zum Schließen.
+
+Ein Finding kann `READY_FOR_CLOSURE` oder `CLOSED` deshalb nur erreichen, wenn sein
+`Review Artifact`-Feld auf die **eigene, neueste** Runde mit `Result: PASS` und passendem
+Scope-Hash verweist. Die vollständige Liste der acht Bedingungen steht in
+[`.claude/rules/factory-workflow.md`](../../.claude/rules/factory-workflow.md), Abschnitt "Die
+Bindung des Reviews an Finding und Codezustand".

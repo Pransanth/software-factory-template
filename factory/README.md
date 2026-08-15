@@ -42,18 +42,27 @@ python3 factory/guards/run-factory-checks.py
 ```
 
 Exit 0 = alle Checks bestanden, Exit 1 = mindestens einer fehlgeschlagen — mit einer klaren
-Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Er führt zwei Arten von Check aus,
-beide ohne KI, ohne Netzwerk, rein regelbasiert:
+Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Er führt drei Arten von Check
+aus, alle ohne KI, ohne Netzwerk, rein regelbasiert:
 
 1. **Finding-Validierung**: jede Datei unter `factory/findings/` gegen
    [`validate-finding.py`](guards/validate-finding.py). Für ein Finding, das `READY_FOR_CLOSURE`
-   oder `CLOSED` erreichen will, prüft dieser Schritt zusätzlich strukturell, dass das
-   referenzierte Review-Artefakt existiert und `Result: PASS` enthält (siehe "Verification Skill
-   und unabhängiger Reviewer" weiter unten).
+   oder `CLOSED` erreichen will, prüft dieser Schritt die vollständige Closure-Bindung: das
+   referenzierte Review-Artefakt muss die **eigene, neueste** Review-Runde dieses Findings sein,
+   den Review-Guard bestehen, `Result: PASS` tragen und einen `Reviewed Scope Hash`, der noch dem
+   aktuellen Repository-Stand entspricht (siehe
+   [`.claude/rules/factory-workflow.md`](../.claude/rules/factory-workflow.md), "Die Bindung des
+   Reviews an Finding und Codezustand"). Zusätzlich gilt hier der P0-Stopp.
 2. **Review-Guard**: jede Datei unter `factory/reviews/` (außer `README.md`) gegen
    [`validate-review.py`](guards/validate-review.py) — prüft nur die Struktur eines
-   Review-Artefakts (alle Felder ausgefüllt, `Result` ein gültiger Wert, Reviewer-Provenienz
-   korrekt), nicht dessen inhaltliche Richtigkeit.
+   Review-Artefakts (kanonischer Rundenname, alle Felder ausgefüllt, `Result` ein gültiger Wert,
+   Reviewer-Provenienz korrekt, Scope-Hash wohlgeformt), nicht dessen inhaltliche Richtigkeit.
+3. **Control-Plane-Guard**: [`validate-control-plane.py`](guards/validate-control-plane.py)
+   vergleicht die Kontrollebene der Factory (Guards, Skripte, Hooks, Agent, Skills, Regeln,
+   CI-Workflow, `CLAUDE.md`) gegen das gestempelte Manifest `factory/control-plane.sha256`. Das
+   ist der Schritt, der verhindert, dass ein normales Finding still den Guard verändert, der es
+   gleich prüfen soll — CI checkt den PR-Head aus und würde sonst mit genau dieser veränderten
+   Datei prüfen.
 
 **Projektspezifische Guards** (z. B. ein AST-Guard, der eine bestimmte Laufzeit-Sicherheitsgrenze
 der Anwendung erzwingt) gehören ausdrücklich **nicht** in diese Vorlage, sondern in das jeweilige
@@ -95,10 +104,14 @@ einen einmaligen Chat-Prompt gebunden:
   `EXPERT_REVIEW_REQUIRED`, mit Begründung und Fundstellen. Der implementierende Agent darf
   dieses Ergebnis nicht nachträglich überschreiben.
 - **[`factory/reviews/`](reviews/README.md)** ist der Ort für Review-Artefakte
-  (`factory/reviews/<Finding-ID>.md`). Sie entstehen **ausschließlich** über den
+  (`factory/reviews/<Finding-ID>.round-<N>.md`). Sie entstehen **ausschließlich** über den
   `SubagentStop`-Hook aus den echten Ereignisdaten des Reviewer-Laufs (Provenienz-Felder
   `Reviewer Agent Type` / `Reviewer Agent ID`) und werden strukturell von `validate-review.py`
-  geprüft.
+  geprüft. Runden werden **nie überschrieben**: jede neue Review-Runde bekommt die nächste freie
+  Nummer, und der Hook stempelt zusätzlich den `Reviewed Scope Hash` des Moments ein, in dem der
+  Reviewer fertig war. Dadurch verliert ein `PASS` seine Gültigkeit, sobald sich der geprüfte
+  Code ändert, und ein `FAIL` lässt sich nicht durch erneutes Fragen gegen denselben Codestand
+  wegsampeln.
 
 **Implementierender Agent vs. unabhängiger Reviewer:** Der implementierende Agent (der die
 Reparatur baut und den `verify-finding`-Skill ausführt) hat vollen Werkzeugzugriff, kennt die
@@ -115,10 +128,16 @@ implementierenden Agenten zu verlassen.
   Finding-Worktree deterministisch auf dem aktuellen Stand von `origin/<default-branch>` an
   (`--no-track`, HEAD-Verifikation gegen den erwarteten SHA, sonst `AUTONOMY_BLOCKER`).
 - [`factory/scripts/gh-api.sh`](scripts/gh-api.sh) — minimaler GitHub-REST-Zugriff über den
-  git-credential-Helper. **`gh` wird nicht vorausgesetzt.**
+  git-credential-Helper. **`gh` wird nicht vorausgesetzt.** Der Repository-Slug wird aus allen
+  unterstützten origin-Schreibweisen normalisiert und gegen `OWNER/REPO` validiert; der
+  HTTP-Status wird ausgewertet, sodass ein 401/403/404/422/429/5xx als `api_error` mit
+  Exit ≠ 0 sichtbar wird statt als leere Normalantwort.
 - [`factory/scripts/gh-query.sh`](scripts/gh-query.sh) — feste, eng gefasste Unterbefehle für
-  PR-, Check-, Actions-, Ruleset- und Merge-Routine, jeweils mit `key: value`-Ausgabe, damit
-  keine ad-hoc-Pipeline und keine Zwischen-JSON-Datei nötig ist.
+  PR-, Check-, Actions-, Ruleset- und Merge-Routine, jeweils mit `key: value`-Ausgabe. Die
+  Auswertung der Antworten liegt in [`factory/guards/gh_evidence.py`](guards/gh_evidence.py) und
+  ist damit ohne Netz testbar. `required-check <SHA> [NAME]` liefert genau ein Urteil plus
+  Exit-Code; `merge <PR> <METHOD> <SHA>` verlangt den erwarteten Head-SHA und übergibt ihn an die
+  GitHub-API.
 - [`factory/scripts/factory-preflight.sh`](scripts/factory-preflight.sh) — der Onboarding-Check
   für ein neues Projekt, siehe [`factory/ONBOARDING.md`](ONBOARDING.md).
 

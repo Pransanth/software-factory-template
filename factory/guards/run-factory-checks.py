@@ -6,18 +6,27 @@ passes the factory's automated checks. Everything else -- the local Stop
 hook, GitHub CI -- is expected to call this script rather than
 re-implement its own checking logic.
 
-There are two kinds of check, run in order:
+There are three kinds of check, run in order:
   1. Every finding under factory/findings/ must pass
      factory/guards/validate-finding.py. For a finding trying to reach
-     READY_FOR_CLOSURE/CLOSED, this already includes checking that its
-     referenced review artifact exists and says "Result: PASS" -- see that
-     script's docstring.
+     READY_FOR_CLOSURE/CLOSED, this includes the full closure binding:
+     the referenced review artifact must be this finding's own latest
+     round, must pass the review guard, must say "Result: PASS", and its
+     scope hash must still match the repository -- see that script's
+     docstring.
   2. Every review artifact under factory/reviews/ must pass
      factory/guards/validate-review.py -- structural completeness only
-     (are all required fields filled in, is Result a valid value). Whether
-     a review's content is actually correct is not something a
-     deterministic script can judge; that is the independent reviewer's
-     job (.claude/agents/finding-closure-reviewer.md).
+     (are all required fields filled in, is the file name a canonical
+     round, is Result a valid value). Whether a review's content is
+     actually correct is not something a deterministic script can judge;
+     that is the independent reviewer's job
+     (.claude/agents/finding-closure-reviewer.md).
+  3. The factory's own control plane must match its stamped manifest
+     (factory/guards/validate-control-plane.py). This is what stops a
+     normal finding from silently changing the guards, scripts, hooks,
+     rules or CI workflow that judge it -- CI runs those from the pull
+     request's own head, so without this check a branch could weaken the
+     guard that was about to check it.
 
 Project-specific guards (e.g. an AST guard that enforces a particular
 runtime security boundary of the application this factory is used on) are
@@ -45,6 +54,7 @@ from pathlib import Path
 THIS_DIR = Path(__file__).resolve().parent
 VALIDATOR = THIS_DIR / "validate-finding.py"
 REVIEW_GUARD = THIS_DIR / "validate-review.py"
+CONTROL_PLANE_GUARD = THIS_DIR / "validate-control-plane.py"
 DEFAULT_FINDINGS_DIR = THIS_DIR.parent / "findings"
 DEFAULT_REVIEWS_DIR = THIS_DIR.parent / "reviews"
 
@@ -131,6 +141,31 @@ def run_review_checks(reviews_dir):
     return ok, report
 
 
+def run_control_plane_checks():
+    """Run the control-plane guard. Returns (ok: bool, report_lines: list[str])."""
+    report = []
+
+    if not CONTROL_PLANE_GUARD.is_file():
+        report.append(f"[FEHLER] Control-Plane-Guard nicht gefunden: {CONTROL_PLANE_GUARD}")
+        return False, report
+
+    result = subprocess.run(
+        [sys.executable, str(CONTROL_PLANE_GUARD)],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        report.append("[OK]     control-plane-guard: Kontrollebene unveraendert")
+        return True, report
+
+    report.append("[FEHLER] control-plane-guard: Kontrollebene weicht vom Manifest ab")
+    for stream in (result.stdout, result.stderr):
+        for line in stream.splitlines():
+            if line.strip():
+                report.append(f"           {line}")
+    return False, report
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -149,9 +184,10 @@ def main(argv):
 
     finding_ok, finding_report = run_finding_checks(args.findings_dir)
     reviews_ok, reviews_report = run_review_checks(args.reviews_dir)
+    control_plane_ok, control_plane_report = run_control_plane_checks()
 
-    ok = finding_ok and reviews_ok
-    report = finding_report + reviews_report
+    ok = finding_ok and reviews_ok and control_plane_ok
+    report = finding_report + reviews_report + control_plane_report
 
     stream = sys.stdout if ok else sys.stderr
     for line in report:
