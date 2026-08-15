@@ -131,6 +131,79 @@ Factory-Checks: ALLE BESTANDEN
 EXIT:0
 ```
 
+## Nachtrag: von der externen CI gefundene Lücke (Scope-Hash-Reinheit)
+
+Der erste CI-Lauf (Run 31884177584, Python 3.11) war **rot**, während lokal alles grün war. Der
+Log zeigte genau einen Fehlschlag:
+`ScopeHashPurityTests`-Vorläufer `test_writing_a_finding_does_not_change_the_hash` —
+`'sha256:e2b96d…' != 'sha256:3e39e7…'`.
+
+**Ursache, reproduziert statt vermutet:** Der SubagentStop-Hook und `validate-finding.py`
+*importieren* `scope_hash`. CPython legt dabei standardmäßig
+`factory/guards/__pycache__/scope_hash.cpython-311.pyc` **neben die Quelle**. Ein anschließendes
+`git add -A` trackt diese generierte Datei — und da der Scope-Hash über alle *getrackten*
+Dateien läuft, ändert er sich ohne jede inhaltliche Änderung. **Das Messen veränderte den
+gemessenen Zustand.** Lokal unsichtbar, weil das dort verwendete `python3`
+`sys.pycache_prefix` auf einen zentralen Cache umlenkt.
+
+Das ist kein Testartefakt, sondern ein echter F-03-Defekt: im normalen Ablauf (Reviewer läuft →
+Agent committet mit `git add -A`) hätte er ein soeben erteiltes `PASS` still entwertet.
+
+Reproduktion in einer Wegwerf-Kopie, mit `sitecustomize.py` auf CPython-Standardverhalten
+normalisiert:
+
+```
+--- AKTUELLER Hook, ohne .gitignore (= CI-Bedingung) ---
+  Bytecode im Projekt:              ['factory/guards/__pycache__/scope_hash.cpython-39.pyc']
+  davon getrackt nach 'git add -A': ['factory/guards/__pycache__/scope_hash.cpython-39.pyc']
+  ERGEBNIS: VERSCHIEDEN (Test faellt durch)
+--- GEPATCHTER Hook (sys.dont_write_bytecode) ---
+  Bytecode im Projekt:              (keiner)
+  ERGEBNIS: GLEICH (Test besteht)
+```
+
+**Zielinvariante:** Das Berechnen oder Importieren des Scope-Hash-Mechanismus darf den
+gemessenen Zustand niemals selbst verändern.
+
+**Minimaler robuster Fix.** Die Invariante lässt sich nicht in `scope_hash.py` selbst
+durchsetzen — CPython schreibt die `.pyc`, *bevor* der Modulcode läuft. Sie muss deshalb jeder
+Importeur setzen, und das sind genau zwei: `.claude/hooks/subagentstop-write-review.py` und
+`factory/guards/validate-finding.py`, je eine Zeile `sys.dont_write_bytecode = True`. Alle
+übrigen Factory-Skripte rufen den Mechanismus als Subprozess auf, wobei per CPython-Semantik
+kein Bytecode entsteht. Als Defense in Depth deckt `.gitignore` (`__pycache__/`, `*.py[cod]`)
+jedes andere Werkzeug im Repository ab, insbesondere `python3 -m unittest`.
+
+**Bewusst nicht getan:** kein Pfad wird nachträglich aus dem Hash ausgeschlossen (ein
+sourceless `.pyc` kann Code ausführen — eine Ausnahmeliste wäre genau der blinde Fleck, den
+dieser Auftrag beseitigt), keine plattformspezifische Sonderbehandlung, keine Änderung der
+Review-/Commit-Bindungsinvariante.
+
+**Regressionstests** (`ScopeHashPurityTests`, 8 Tests). Sie normalisieren den Interpreter über
+ein `sitecustomize.py` **außerhalb** der Fixture auf CPythons dokumentierten Standard
+(`sys.pycache_prefix = None`) — das *entfernt* eine Plattform-Sonderbehandlung, statt eine
+einzuführen — und entfernen ein geerbtes `PYTHONDONTWRITEBYTECODE` aus der Umgebung, damit sie
+nicht leer bestehen können. Rot/Grün-Trennung:
+
+```
+ohne Fix:  FAIL test_the_finding_validator_writes_no_bytecode
+           FAIL test_git_add_after_measuring_tracks_no_bytecode
+           FAIL test_scope_hash_is_unchanged_by_measuring_it
+           FAIL test_the_review_binding_survives_a_measurement
+           Ran 8 tests -- FAILED (failures=4)
+mit Fix:   Ran 8 tests -- OK
+```
+
+Die vier übrigen Tests bestehen in **beiden** Läufen und sichern gegen Über-Reparatur ab: eine
+echte Codeänderung verändert den Hash weiterhin, ein absichtlich getracktes `.pyc` bleibt Teil
+des Hashes, und die Zahl der gehashten Dateien wird gegen die tatsächliche `git ls-files`-Liste
+gezählt, sodass genau zwei Ausschlüsse (`factory/findings/`, `factory/reviews/`) nachweisbar
+bleiben.
+
+**Nebenfund in der Fixture:** Sie stempelte `factory/control-plane.sha256` nach dem
+Initial-Commit, es war also ungetrackt und wurde beim ersten `git add -A` in den Hash gezogen —
+optisch identisch mit dem Bytecode-Defekt. Die Fixture setzt ihren Zustand jetzt vorab. Kein
+Produktionsdefekt: im echten Repository ist das Manifest committet.
+
 ## Green Runtime Fix Evidence
 
 Alle folgenden Läufe stammen aus dem Zustand, der in diesem Branch reviewt und gemergt wird.
@@ -143,15 +216,23 @@ Ran 29 tests in 3.438s
 OK
 ```
 
-**Vollständige Guard-Suite (8 Module):**
+**Vollständige Guard-Suite (8 Module, inklusive der acht neuen Purity-Tests):**
 
 ```
 $ python3 -m unittest factory.guards.test_validate_finding factory.guards.test_validate_review \
     factory.guards.test_run_factory_checks factory.guards.test_create_finding_worktree \
     factory.guards.test_factory_preflight factory.guards.test_trust_core \
     factory.guards.test_control_plane factory.guards.test_gh_evidence
-Ran 170 tests in 21.266s
+Ran 178 tests in 24.001s
 OK
+```
+
+**Reinheit nach dem kompletten lokalen Lauf** -- weder Guards noch Tests hinterlassen
+getrackten Bytecode:
+
+```
+$ git ls-files | grep -E "__pycache__|\.pyc$"
+(keine Treffer)
 ```
 
 **SubagentStop-/Provenienz-Tests (append-only Runden, Scope-Bindung, verworfene
