@@ -42,7 +42,7 @@ python3 factory/guards/run-factory-checks.py
 ```
 
 Exit 0 = alle Checks bestanden, Exit 1 = mindestens einer fehlgeschlagen — mit einer klaren
-Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Er führt drei Arten von Check
+Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Er führt vier Arten von Check
 aus, alle ohne KI, ohne Netzwerk, rein regelbasiert:
 
 1. **Finding-Validierung**: jede Datei unter `factory/findings/` gegen
@@ -53,7 +53,13 @@ aus, alle ohne KI, ohne Netzwerk, rein regelbasiert:
    aktuellen Repository-Stand entspricht (siehe
    [`.claude/rules/factory-workflow.md`](../.claude/rules/factory-workflow.md), "Die Bindung des
    Reviews an Finding und Codezustand"). Zusätzlich gilt hier der P0-Stopp.
-2. **Review-Guard**: jede Datei unter `factory/reviews/` (außer `README.md`) gegen
+2. **Bauauftrags-Guard**: jede Datei unter `factory/build-orders/` (außer `README.md`) gegen
+   [`validate-build-order.py`](guards/validate-build-order.py) — kanonischer Ort, gegenseitige
+   Bindung an genau ein existierendes Finding, alle Pflichtabschnitte, keine Platzhalter, und
+   lebenszyklusabhängig ein tatsächlich zitierter roter bzw. grüner Lauf. Ab `IMPLEMENTING`
+   verlangt zusätzlich der Finding-Validator diesen Bauauftrag (Audit-Befund F-10): ohne ihn hat
+   der unabhängige Reviewer nichts, wogegen er den Code halten könnte.
+3. **Review-Guard**: jede Datei unter `factory/reviews/` (außer `README.md`) gegen
    [`validate-review.py`](guards/validate-review.py) — prüft nur die Struktur eines
    Review-Artefakts (kanonischer Rundenname, alle Felder ausgefüllt, `Result` ein gültiger Wert,
    Reviewer-Provenienz korrekt, Scope-Hash wohlgeformt), nicht dessen inhaltliche Richtigkeit.

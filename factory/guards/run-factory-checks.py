@@ -55,8 +55,14 @@ THIS_DIR = Path(__file__).resolve().parent
 VALIDATOR = THIS_DIR / "validate-finding.py"
 REVIEW_GUARD = THIS_DIR / "validate-review.py"
 CONTROL_PLANE_GUARD = THIS_DIR / "validate-control-plane.py"
+BUILD_ORDER_GUARD = THIS_DIR / "validate-build-order.py"
 DEFAULT_FINDINGS_DIR = THIS_DIR.parent / "findings"
 DEFAULT_REVIEWS_DIR = THIS_DIR.parent / "reviews"
+DEFAULT_BUILD_ORDERS_DIR = THIS_DIR.parent / "build-orders"
+
+# factory/build-orders/README.md documents the format; it is not a build
+# order and must not be validated as an orphan one.
+NON_BUILD_ORDER_NAMES = {"README.md"}
 
 
 def run_finding_checks(findings_dir):
@@ -141,6 +147,55 @@ def run_review_checks(reviews_dir):
     return ok, report
 
 
+def run_build_order_checks(build_orders_dir):
+    """Run the build-order guard against every build order (audit finding F-10).
+
+    Returns (ok: bool, report_lines: list[str]).
+
+    The finding validator already refuses a finding from IMPLEMENTING onwards
+    whose own build order is missing or invalid. This pass is the other
+    direction: a build order that belongs to no finding, or that decayed into
+    placeholders, is caught here even when no finding currently points at it.
+    """
+    report = []
+
+    if not BUILD_ORDER_GUARD.is_file():
+        report.append(f"[FEHLER] Bauauftrags-Guard nicht gefunden: {BUILD_ORDER_GUARD}")
+        return False, report
+
+    if not build_orders_dir.is_dir():
+        report.append(
+            f"Kein Bauauftrags-Verzeichnis unter {build_orders_dir} -- nichts zu pruefen."
+        )
+        return True, report
+
+    candidate_files = sorted(
+        p for p in build_orders_dir.glob("*.md") if p.name not in NON_BUILD_ORDER_NAMES
+    )
+    if not candidate_files:
+        report.append(f"Keine Bauauftraege unter {build_orders_dir} -- nichts zu pruefen.")
+        return True, report
+
+    ok = True
+    for candidate_file in candidate_files:
+        result = subprocess.run(
+            [sys.executable, str(BUILD_ORDER_GUARD), str(candidate_file)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            report.append(f"[OK]     build-order-guard: {candidate_file.name}")
+        else:
+            ok = False
+            report.append(f"[FEHLER] build-order-guard: {candidate_file.name}")
+            for stream in (result.stdout, result.stderr):
+                for line in stream.splitlines():
+                    if line.strip():
+                        report.append(f"           {line}")
+
+    return ok, report
+
+
 def run_control_plane_checks():
     """Run the control-plane guard. Returns (ok: bool, report_lines: list[str])."""
     report = []
@@ -180,14 +235,21 @@ def main(argv):
         default=DEFAULT_REVIEWS_DIR,
         help="Verzeichnis mit Review-Artefakten (Standard: factory/reviews)",
     )
+    parser.add_argument(
+        "--build-orders-dir",
+        type=Path,
+        default=DEFAULT_BUILD_ORDERS_DIR,
+        help="Verzeichnis mit Bauauftraegen (Standard: factory/build-orders)",
+    )
     args = parser.parse_args(argv[1:])
 
     finding_ok, finding_report = run_finding_checks(args.findings_dir)
+    build_order_ok, build_order_report = run_build_order_checks(args.build_orders_dir)
     reviews_ok, reviews_report = run_review_checks(args.reviews_dir)
     control_plane_ok, control_plane_report = run_control_plane_checks()
 
-    ok = finding_ok and reviews_ok and control_plane_ok
-    report = finding_report + reviews_report + control_plane_report
+    ok = finding_ok and build_order_ok and reviews_ok and control_plane_ok
+    report = finding_report + build_order_report + reviews_report + control_plane_report
 
     stream = sys.stdout if ok else sys.stderr
     for line in report:

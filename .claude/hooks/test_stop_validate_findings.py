@@ -37,6 +37,7 @@ GUARD_FILES = (
     "validate-finding.py",
     "run-factory-checks.py",
     "validate-review.py",
+    "validate-build-order.py",
     "validate-control-plane.py",
     "scope_hash.py",
 )

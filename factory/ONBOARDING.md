@@ -10,10 +10,27 @@ factory/scripts/factory-preflight.sh
 factory/scripts/factory-preflight.sh --local-only   # ohne Netz/GitHub
 ```
 
-Es endet mit `FACTORY_PREFLIGHT: PASS` (Exit 0) oder `FACTORY_PREFLIGHT: BLOCKED` (Exit 1) samt
-einer nummerierten Liste der noch fehlenden einmaligen Schritte. Das Skript **verändert nichts**:
-es legt kein Repository an, erzeugt kein Token, konfiguriert kein Ruleset, schreibt keine
-Berechtigungen und erstellt keinen PR. Es prüft, erklärt — und wird danach erneut ausgeführt.
+Es endet mit genau einem von drei Ergebnissen:
+
+| Ergebnis | Exit | Bedeutung |
+|---|---|---|
+| `FACTORY_PREFLIGHT: PASS` | 0 | Lokale **und** GitHub-/Remote-Ebene geprüft; unbeaufsichtigte Läufe sind bereit. |
+| `FACTORY_PREFLIGHT: BLOCKED` | 1 | Mindestens eine Voraussetzung fehlt, jede mit dem exakten einmaligen Schritt. |
+| `FACTORY_PREFLIGHT: PARTIAL` | 3 | Nur bei `--local-only`: lokal in Ordnung, GitHub-Ebene **nicht geprüft**. Kein PASS. |
+
+`PARTIAL` ist die Korrektur eines Audit-Befunds (F-11): `--local-only` meldete früher `PASS` und
+„unbeaufsichtigte Läufe sind bereit", obwohl sämtliche GitHub-Prüfungen übersprungen wurden. Eine
+nicht geprüfte Ebene ist keine bestandene Ebene.
+
+Meldet der Preflight einen `[GOVERNANCE]`-Punkt — praktisch: erforderliche Approvals auf dem
+Default-Branch —, ist das keine technische Aufgabe, sondern eine Entscheidung des Projektinhabers.
+Sie wird **nicht** technisch umgangen; siehe die Erklärung im Skript.
+
+Das Skript **verändert nichts**: es legt kein Repository an, erzeugt kein Token, konfiguriert kein
+Ruleset, schreibt keine Berechtigungen und erstellt keinen PR. Es prüft, erklärt — und wird danach
+erneut ausgeführt. Es **führt** allerdings die installierte Factory aus (Control-Plane-Guard,
+kanonischer Runner, entdeckte Testsuite), damit „vorhanden" nicht mit „funktionsfähig" verwechselt
+wird; dieser Teil dauert je nach Projektgröße etwas.
 
 ## Was der Preflight prüft
 

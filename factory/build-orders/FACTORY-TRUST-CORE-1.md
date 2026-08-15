@@ -72,6 +72,25 @@ factory/reviews/README.md         (Formatbeschreibung)
 CLAUDE.md
 ```
 
+> **Korrektur, nachgetragen im Operational-Robustness-Paket.** Der Block oben nennt sich
+> „abschließend", war es aber nicht. Zwei tatsächlich geänderte Dateien fehlten:
+>
+> ```
+> .gitignore                                   (Defense-in-Depth-Haelfte des
+>                                               Scope-Hash-Reinheitsfixes, im Abschnitt
+>                                               "Nachtrag" unten beschrieben)
+> .claude/hooks/test_stop_validate_findings.py (Fixture auf ein echtes Repository mit
+>                                               gestempeltem Manifest umgestellt, zwei
+>                                               Tests ergaenzt)
+> ```
+>
+> Der unabhängige Review von Runde 1 hat das als Scope-Abweichung festgehalten. Beide gehören
+> sachlich zu diesem Auftrag und verschärfen, statt zu schwächen — aber der Scope-Block hätte
+> nachgezogen werden müssen. Er wird hier ausdrücklich **ergänzt und als Korrektur markiert**,
+> nicht rückwirkend so dargestellt, als sei er immer vollständig gewesen. Das Review-Artefakt
+> `factory/reviews/FACTORY-TRUST-CORE-1.round-1.md` bleibt unverändert; es ist append-only und
+> hält den Einwand dauerhaft fest.
+
 Weil dies ein `FACTORY_CHANGE` ist, liegen die geschützten Factory-Pfade hier ausnahmsweise
 **im** Scope. Genau deshalb muss der unabhängige Review den vollständigen Control-Plane-Diff
 prüfen und nicht nur den Anlass.
@@ -328,9 +347,33 @@ weggeredet werden:
 2. **Das Control-Plane-Manifest wird in genau diesem Auftrag zum ersten Mal gestempelt.** Ein
    Manifest, das im selben Commit entsteht wie die Dateien, die es beschreibt, beweist für diesen
    Commit nichts. Sein Wert beginnt beim *nächsten* Finding: ab dann ist jede Abweichung sichtbar.
-3. **Vier Dateien der Kontrollebene konnten vom implementierenden Agenten nicht geschrieben
-   werden** (`.claude/hooks/`, `.claude/agents/`, `.claude/skills/`, `.claude/settings.json`,
+3. **Dateien der Kontrollebene konnten vom implementierenden Agenten nicht geschrieben werden**
+   (`.claude/hooks/`, `.claude/agents/`, `.claude/skills/`, `.claude/settings.json`,
    `factory/reviews/README.md`), weil genau dieser Schutz greift. Sie wurden als Patches
    ausgeliefert und von einem Menschen angewandt. Das ist keine Umgehung des Schutzes, sondern
    sein bestimmungsgemäßes Verhalten — und der Grund, warum ein `FACTORY_CHANGE` eine menschliche
    Entscheidung verlangt.
+
+> **Korrektur zu Punkt 3, nachgetragen im Operational-Robustness-Paket.** Die ursprüngliche
+> Fassung schrieb „**Vier** Dateien" und listete darunter fünf Pfadeinträge. Der unabhängige
+> Review von Runde 1 hat die Zahl als falsch und die Zeitachse als unvollständig beanstandet.
+> Richtig ist:
+>
+> - Extern eingespielt wurden **sechs** geschützte Control-Plane-Dateien (plus
+>   `factory/reviews/README.md`, das kein Manifest-Eintrag ist):
+>   `.claude/agents/finding-closure-reviewer.md`, `.claude/hooks/subagentstop-write-review.py`,
+>   `.claude/hooks/test_stop_validate_findings.py`,
+>   `.claude/hooks/test_subagentstop_write_review.py`, `.claude/settings.json` und
+>   `.claude/skills/verify-finding/SKILL.md`. Der Abschnitt „Green Runtime Fix Evidence" oben
+>   nannte bereits korrekt „die sechs geschützten Control-Plane-Dateien" — die beiden Stellen
+>   widersprachen sich also.
+> - Es gab **zwei** externe Übernahmerunden, nicht eine. Die zweite war nötig, nachdem die
+>   externe CI den Scope-Hash-Reinheitsdefekt aufgedeckt hatte: dafür mussten
+>   `.claude/hooks/subagentstop-write-review.py` und
+>   `.claude/hooks/test_subagentstop_write_review.py` ein zweites Mal extern angewandt werden.
+>   Erkennbar ist das daran, dass die im Guard-Output oben zitierten Hashes dieser beiden Dateien
+>   (`eb2faf43…`, `6dfe7f86…`) nicht die endgültigen Manifest-Hashes sind (`3cac7ddd…`,
+>   `8d98a894…`); genau darauf hat der Reviewer hingewiesen.
+>
+> Nichts davon war verschwiegen — die Zahl und die Zeitachse waren falsch. Sie werden hier
+> korrigiert; das Review-Artefakt bleibt unverändert.

@@ -33,6 +33,7 @@ GUARD_FILES = (
     "run-factory-checks.py",
     "validate-finding.py",
     "validate-review.py",
+    "validate-build-order.py",
     "validate-control-plane.py",
     "scope_hash.py",
 )
@@ -161,6 +162,59 @@ def _git(cwd, *args):
     return result.stdout.strip()
 
 
+# From IMPLEMENTING onwards a finding needs its own valid build order
+# (audit finding F-10). These tests are about the runner, not about build
+# orders, so the fixture supplies a valid one as the normal case instead of
+# every test restating it. factory/guards/test_build_order.py is where the
+# build-order rules themselves are pinned down.
+BUILD_ORDER_TEMPLATE = """\
+# Bauauftrag: {finding}
+
+## Primäre Sicherheitsgrenze
+
+Die Org-ID wird nicht mehr als Parameter durchgereicht, sondern aus dem
+Auftragskontext abgeleitet, sodass der unsichere Zustand unerreichbar wird.
+
+## Verbindliche Reihenfolge
+
+1. Regressionstest schreiben und ROT beobachten.
+2. Laufzeitgrenze umsetzen, bis derselbe Test GRUEN ist.
+3. Zentralen Guard ergaenzen und kanonischen Runner laufen lassen.
+
+## Acceptance Criteria
+
+Ein Job ohne abgeleitete Org-ID ist nicht mehr registrierbar, und der zentrale
+Guard erkennt jeden erneuten Versuch, sie als Parameter zu uebergeben.
+
+## Scope
+
+Erlaubt und abschliessend: app/jobs/**, app/tests/test_jobs.py. Alles andere
+ist out of scope, insbesondere die geschuetzten Factory-Pfade.
+
+## Red Regression Evidence
+
+```
+FAIL: test_job_without_org_is_rejected
+AssertionError: 0 != 1 : guard accepted what it must reject.
+```
+
+## Green Runtime Fix Evidence
+
+```
+$ python3 -m unittest app.tests.test_jobs
+Ran 4 tests in 0.112s
+OK
+```
+"""
+
+STATUSES_NEEDING_BUILD_ORDER = (
+    "IMPLEMENTING",
+    "VERIFYING",
+    "READY_FOR_CLOSURE",
+    "CLOSED",
+)
+
+
 class RunFactoryChecksTests(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = Path(tempfile.mkdtemp(prefix="factory-runner-test-")).resolve()
@@ -170,9 +224,11 @@ class RunFactoryChecksTests(unittest.TestCase):
         guards_dir = self.root / "factory" / "guards"
         self.findings_dir = self.root / "factory" / "findings"
         self.reviews_dir = self.root / "factory" / "reviews"
+        self.build_orders_dir = self.root / "factory" / "build-orders"
         guards_dir.mkdir(parents=True)
         self.findings_dir.mkdir(parents=True)
         self.reviews_dir.mkdir(parents=True)
+        self.build_orders_dir.mkdir(parents=True)
         (self.root / "app").mkdir()
         (self.root / "app" / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
 
@@ -218,6 +274,13 @@ class RunFactoryChecksTests(unittest.TestCase):
 
     def write_finding(self, name, content):
         (self.findings_dir / name).write_text(content, encoding="utf-8")
+        if any(f"Status: {status}" in content for status in STATUSES_NEEDING_BUILD_ORDER):
+            self.write_build_order(Path(name).stem)
+
+    def write_build_order(self, finding_id):
+        (self.build_orders_dir / f"{finding_id}.md").write_text(
+            BUILD_ORDER_TEMPLATE.format(finding=finding_id), encoding="utf-8"
+        )
 
     def write_review(self, name, content):
         (self.reviews_dir / name).write_text(content, encoding="utf-8")

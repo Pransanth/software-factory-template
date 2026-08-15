@@ -233,6 +233,181 @@ def required_checks(payload):
     return lines
 
 
+def pr_for_branch(payload, branch):
+    """Which pull request already exists for this branch (audit finding F-16)?
+
+    Resume needs this: after a crashed session a new agent must be able to
+    tell "no PR yet" from "PR #4 is open" from "PR #4 was already merged"
+    without guessing from local state, which may be gone. Absence is reported
+    as its own verdict with its own exit code -- "there is no PR" must never
+    look like "the query failed", and vice versa.
+    """
+    if not isinstance(payload, list):
+        detail = error_message(payload) or "unerwartete Antwort (keine PR-Liste)"
+        raise ApiError(detail)
+
+    matching = [
+        pr
+        for pr in payload
+        if isinstance(pr, dict) and ((pr.get("head") or {}).get("ref") == branch)
+    ]
+
+    lines = [f"branch: {branch}", f"pr_count: {len(matching)}"]
+    if not matching:
+        lines.append("pr_for_branch: none")
+        return "absent", lines
+
+    for pr in matching:
+        head = pr.get("head") or {}
+        base = pr.get("base") or {}
+        lines.append(
+            f"pr: number={pr.get('number')} state={pr.get('state')} "
+            f"merged={'true' if pr.get('merged_at') else 'false'} "
+            f"head_sha={head.get('sha')} base_ref={base.get('ref')}"
+        )
+
+    # At most one pull request per head branch can be open at a time, so an
+    # open one is unambiguous. Otherwise take the highest number, which is the
+    # most recently created -- deterministic, unlike "most recently updated".
+    open_prs = [pr for pr in matching if pr.get("state") == "open"]
+    chosen = open_prs[0] if open_prs else max(matching, key=lambda pr: pr.get("number") or 0)
+    lines += [
+        f"current_pr: {chosen.get('number')}",
+        f"current_pr_state: {chosen.get('state')}",
+        f"current_pr_merged: {'true' if chosen.get('merged_at') else 'false'}",
+        f"current_pr_head_sha: {(chosen.get('head') or {}).get('sha')}",
+    ]
+    return "present", lines
+
+
+def pr_permission_probe(payload, api_exit_code):
+    """Can this token open pull requests (audit finding F-12)?
+
+    The probe posts head == base, which can never create a pull request, and
+    GitHub checks token permission before it validates the payload. So a
+    validation error proves the permission is there.
+
+    The pre-repair version classified by exclusion: anything that was not
+    recognisably a 403 was reported as PERMITTED. A 401 from a wrong or
+    expired token, a 404 from a repository the token cannot see, an empty
+    body, a rate limit and an HTML error page all ended up as "Token darf
+    Pull Requests erstellen". Onboarding then declared the factory ready, and
+    the truth surfaced much later -- at the moment the first real pull request
+    was supposed to be opened, in an unattended run.
+
+    This version recognises permission POSITIVELY and only positively: the
+    request must have failed with GitHub's own validation error. Everything
+    else is blocked, including answers this code has never seen.
+    """
+    lines = [f"api_exit_code: {api_exit_code}"]
+
+    if api_exit_code == 0:
+        # A pull request was actually created -- impossible for head == base,
+        # so something is wrong enough that a human has to look.
+        number = payload.get("number") if isinstance(payload, dict) else None
+        lines += [f"created_pr: {number}", "probe: created"]
+        return "created", lines
+
+    message = ""
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or "")
+    lines.append(f"github_message: {message or '(keine)'}")
+
+    if api_exit_code == VERDICT_EXIT_CODES["api_error"]:
+        lines.append("probe: api_error")
+        return "api_error", lines
+
+    if message.strip().lower() == "validation failed":
+        lines.append("probe: permitted")
+        return "permitted", lines
+
+    lines.append("probe: blocked")
+    return "blocked", lines
+
+
+def _protection_facts(parameters, check_name, contexts):
+    """Shared rendering for ruleset rules and classic protection."""
+    approvals = parameters.get("required_approving_review_count")
+    return [
+        f"required_approving_review_count: {approvals if approvals is not None else 0}",
+        "required_status_checks: " + (", ".join(contexts) if contexts else "(keine)"),
+        f"required_check_present: {'true' if check_name in contexts else 'false'}",
+    ]
+
+
+def ruleset_guarantees(payload, check_name):
+    """What a ruleset on this branch actually guarantees (audit finding F-13).
+
+    The pre-repair preflight only counted the rules it got back: `COUNT 1` was
+    reported as "Branch-Schutz aktiv". A ruleset that only blocks force-pushes
+    counts as 1 and guarantees nothing whatsoever about merging. This reads the
+    rules instead: is a pull request required at all, is the factory's required
+    status check among the required contexts, and do required approvals mean a
+    human has to approve before anything can merge.
+    """
+    if not isinstance(payload, list):
+        detail = error_message(payload) or "unerwartete Antwort (keine Regel-Liste)"
+        raise ApiError(detail)
+
+    rule_types = sorted({str(rule.get("type")) for rule in payload if isinstance(rule, dict)})
+    pull_request_params = {}
+    contexts = []
+    for rule in payload:
+        if not isinstance(rule, dict):
+            continue
+        parameters = rule.get("parameters") or {}
+        if rule.get("type") == "pull_request":
+            pull_request_params = parameters
+        elif rule.get("type") == "required_status_checks":
+            for check in parameters.get("required_status_checks") or []:
+                if isinstance(check, dict):
+                    contexts.append(str(check.get("context")))
+
+    lines = [
+        "source: ruleset",
+        f"rule_count: {len(payload)}",
+        "rule_types: " + (", ".join(rule_types) if rule_types else "(keine)"),
+        f"pull_request_required: {'true' if 'pull_request' in rule_types else 'false'}",
+    ]
+    lines += _protection_facts(pull_request_params, check_name, contexts)
+    return lines
+
+
+def classic_protection(payload, api_exit_code, check_name):
+    """Classic branch protection, for repositories that do not use rulesets.
+
+    A branch may be protected by a ruleset, by classic branch protection, or by
+    both. Reading only one of them and reporting "kein Schutz" for the other is
+    a false negative that pushes a project towards adding protection it already
+    has -- or worse, towards concluding the check is unreliable and ignoring it.
+    GitHub answers 404 "Branch not protected" when no classic protection
+    exists, which is a legitimate state and not an error.
+    """
+    lines = [f"api_exit_code: {api_exit_code}"]
+    message = str(payload.get("message") or "") if isinstance(payload, dict) else ""
+
+    if api_exit_code != 0:
+        if message.strip().lower() == "branch not protected":
+            lines += ["source: classic", "classic_protection: absent"]
+            return lines
+        raise ApiError(message or f"gh-api.sh endete mit Exit {api_exit_code}")
+
+    if not isinstance(payload, dict):
+        raise ApiError(f"unerwartete Antwortform: {type(payload).__name__}")
+
+    reviews = payload.get("required_pull_request_reviews")
+    status_checks = payload.get("required_status_checks") or {}
+    contexts = [str(context) for context in (status_checks.get("contexts") or [])]
+
+    lines += [
+        "source: classic",
+        "classic_protection: present",
+        f"pull_request_required: {'true' if isinstance(reviews, dict) else 'false'}",
+    ]
+    lines += _protection_facts(reviews or {}, check_name, contexts)
+    return lines
+
+
 def check_runs_summary(payload):
     data = _require_dict_without_error(payload, "check_runs")
     runs = data.get("check_runs") or []
@@ -383,6 +558,78 @@ def main(argv):
         for line in details:
             print(line)
         return VERDICT_EXIT_CODES[verdict]
+
+    if mode == "pr-for-branch":
+        if len(argv) != 3:
+            print("usage: gh_evidence.py pr-for-branch <BRANCH>", file=sys.stderr)
+            return USAGE_EXIT_CODE
+        try:
+            verdict, details = pr_for_branch(payload, argv[2])
+        except ApiError as exc:
+            print("pr_for_branch: api_error")
+            _print_api_error(exc)
+            return VERDICT_EXIT_CODES["api_error"]
+        for line in details:
+            print(line)
+        return 0 if verdict == "present" else VERDICT_EXIT_CODES["absent"]
+
+    if mode == "pr-permission-probe":
+        if len(argv) != 3:
+            print(
+                "usage: gh_evidence.py pr-permission-probe <GH_API_EXIT_CODE>",
+                file=sys.stderr,
+            )
+            return USAGE_EXIT_CODE
+        try:
+            api_exit_code = int(argv[2])
+        except ValueError:
+            print("usage: gh_evidence.py pr-permission-probe <GH_API_EXIT_CODE>", file=sys.stderr)
+            return USAGE_EXIT_CODE
+        verdict, details = pr_permission_probe(payload, api_exit_code)
+        for line in details:
+            print(line)
+        if verdict == "permitted":
+            return 0
+        if verdict == "api_error":
+            return VERDICT_EXIT_CODES["api_error"]
+        return 1
+
+    if mode == "ruleset-guarantees":
+        if len(argv) != 3:
+            print("usage: gh_evidence.py ruleset-guarantees <CHECK_NAME>", file=sys.stderr)
+            return USAGE_EXIT_CODE
+        try:
+            lines = ruleset_guarantees(payload, argv[2])
+        except ApiError as exc:
+            _print_api_error(exc)
+            return VERDICT_EXIT_CODES["api_error"]
+        for line in lines:
+            print(line)
+        return 0
+
+    if mode == "classic-protection":
+        if len(argv) != 4:
+            print(
+                "usage: gh_evidence.py classic-protection <GH_API_EXIT_CODE> <CHECK_NAME>",
+                file=sys.stderr,
+            )
+            return USAGE_EXIT_CODE
+        try:
+            api_exit_code = int(argv[2])
+        except ValueError:
+            print(
+                "usage: gh_evidence.py classic-protection <GH_API_EXIT_CODE> <CHECK_NAME>",
+                file=sys.stderr,
+            )
+            return USAGE_EXIT_CODE
+        try:
+            lines = classic_protection(payload, api_exit_code, argv[3])
+        except ApiError as exc:
+            _print_api_error(exc)
+            return VERDICT_EXIT_CODES["api_error"]
+        for line in lines:
+            print(line)
+        return 0
 
     if mode == "merge-precheck":
         if len(argv) != 3:

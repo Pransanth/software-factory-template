@@ -42,8 +42,53 @@ EXPECTED_AGENT_TYPE = "finding-closure-reviewer"
 GUARD_FILES = (
     "validate-review.py",
     "validate-finding.py",
+    "validate-build-order.py",
     "scope_hash.py",
 )
+
+# From IMPLEMENTING onwards a finding needs its own valid build order (audit
+# finding F-10). These tests are about the hook's provenance stamping, so the
+# fixture supplies one as the normal case; the build-order rules themselves are
+# pinned down in factory/guards/test_build_order.py.
+BUILD_ORDER_TEMPLATE = """\
+# Bauauftrag: {finding}
+
+## Primäre Sicherheitsgrenze
+
+Die Org-ID wird nicht mehr als Parameter durchgereicht, sondern aus dem
+Auftragskontext abgeleitet, sodass der unsichere Zustand unerreichbar wird.
+
+## Verbindliche Reihenfolge
+
+1. Regressionstest schreiben und ROT beobachten.
+2. Laufzeitgrenze umsetzen, bis derselbe Test GRUEN ist.
+3. Zentralen Guard ergaenzen und kanonischen Runner laufen lassen.
+
+## Acceptance Criteria
+
+Ein Job ohne abgeleitete Org-ID ist nicht mehr registrierbar, und der zentrale
+Guard erkennt jeden erneuten Versuch, sie als Parameter zu uebergeben.
+
+## Scope
+
+Erlaubt und abschliessend: app/jobs/**, app/tests/test_jobs.py. Alles andere
+ist out of scope, insbesondere die geschuetzten Factory-Pfade.
+
+## Red Regression Evidence
+
+```
+FAIL: test_job_without_org_is_rejected
+AssertionError: 0 != 1 : guard accepted what it must reject.
+```
+
+## Green Runtime Fix Evidence
+
+```
+$ python3 -m unittest app.tests.test_jobs
+Ran 4 tests in 0.112s
+OK
+```
+"""
 
 GIT_ENV_OVERRIDES = {
     "GIT_AUTHOR_NAME": "Factory Test",
@@ -111,8 +156,10 @@ class SubagentStopHookTestCase(unittest.TestCase):
         guards_dir = self.project_root / "factory" / "guards"
         self.findings_dir = self.project_root / "factory" / "findings"
         self.reviews_dir = self.project_root / "factory" / "reviews"
+        self.build_orders_dir = self.project_root / "factory" / "build-orders"
         guards_dir.mkdir(parents=True)
         self.findings_dir.mkdir(parents=True)
+        self.build_orders_dir.mkdir(parents=True)
         # Deliberately do NOT pre-create factory/reviews/ -- the hook must
         # create it itself if missing.
         for name in GUARD_FILES:
@@ -124,6 +171,11 @@ class SubagentStopHookTestCase(unittest.TestCase):
         _git(self.project_root, "init", "--initial-branch=trunk")
         _git(self.project_root, "add", "-A")
         _git(self.project_root, "commit", "-m", "initial")
+
+    def write_build_order(self, finding_id):
+        path = self.build_orders_dir / f"{finding_id}.md"
+        path.write_text(BUILD_ORDER_TEMPLATE.format(finding=finding_id), encoding="utf-8")
+        return path
 
     def run_hook(self, agent_type=EXPECTED_AGENT_TYPE, agent_id="agent-test-0001", message=None):
         hook_input = {
@@ -379,6 +431,7 @@ class ClosureCompatibilityTests(SubagentStopHookTestCase):
 
     def test_hook_output_is_accepted_by_validate_review_and_closure_gate(self):
         finding_id = "TEST-E2E-1"
+        self.write_build_order(finding_id)
         hook_result = self.run_hook(message=build_message(finding=finding_id, result="PASS"))
         self.assertEqual(hook_result.returncode, 0, hook_result.stderr)
 
@@ -421,6 +474,7 @@ Review Artifact: factory/reviews/{finding_id}.round-1.md
 
     def test_closure_is_refused_after_the_code_moved_on(self):
         finding_id = "TEST-E2E-2"
+        self.write_build_order(finding_id)
         self.run_hook(message=build_message(finding=finding_id, result="PASS"))
         finding_path = self.findings_dir / f"{finding_id}.md"
         finding_path.write_text(

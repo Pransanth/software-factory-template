@@ -26,7 +26,49 @@ Every command below is a simple command run from the repository root (or the fin
 - The finding's `Severity` must be filled in. A `Severity: P0` **cannot** be driven through this
   skill at all: the guard rejects any status past `ANALYZED` for a P0. Record the finding,
   describe the immediate situation, stop, involve a human.
+- The finding must have a **valid build order** at `factory/build-orders/<ID>.md` (audit finding
+  F-10). From IMPLEMENTING onwards `validate-finding.py` rejects the finding without one, so this
+  is not a courtesy check: run
+  `python3 factory/guards/validate-build-order.py factory/build-orders/<ID>.md` and fix whatever
+  it reports before going further. A build order that is an empty shell of headings leaves the
+  independent reviewer with nothing to hold the code against.
 - Read the finding file and its build order in full before doing anything else.
+
+## Step 0 — Resume: establish what already happened (audit finding F-16)
+
+A session can die between any two steps below. Before doing anything, find out what is already
+true instead of guessing. Redoing a push is harmless; carrying an old green result forward onto
+new code is not.
+
+```
+python3 factory/guards/finding_state.py assess <ID>
+git fetch origin
+factory/scripts/gh-query.sh pr-for-branch <finding-branch>
+```
+
+`assess` prints one deterministic block: does the branch exist, is the recorded `pushed_sha` still
+the branch head (`push_state: current|stale`), does the recorded CI evidence belong to that head
+(`ci_state`), how many review rounds exist and does the newest still cover the current scope hash
+(`review_state`), plus a single `resume_next:` line. `pr-for-branch` answers the GitHub half with
+its own exit code: `0` a pull request exists, `3` none does, `4` the query failed — "no PR" and
+"the query failed" are never the same answer.
+
+**`stale` means invalid, not "probably fine".** If `push_state` or `ci_state` is `stale`, that
+evidence belongs to a commit that is no longer the branch head: collect it again for the current
+SHA. If `review_state` is `stale`, the review has expired and a new round is needed (Step 3).
+
+Record what you establish, so the next session need not re-derive it:
+
+```
+python3 factory/guards/finding_state.py record <ID> branch=<branch> pushed_sha=<sha>
+python3 factory/guards/finding_state.py record <ID> pr_number=<n> ci_head_sha=<sha> ci_run=<id>
+```
+
+That state lives under `.factory/`, is gitignored, and is an index into git, GitHub and
+`factory/reviews/` — never a substitute for them, and never evidence in its own right. If a
+worktree is involved, `factory/scripts/create-finding-worktree.sh create ...` is idempotent: it
+reports `WORKTREE_READY`, `WORKTREE_EXISTS`, `WORKTREE_EXISTS_MOVED` or an `AUTONOMY_BLOCKER`, and
+never deletes an existing worktree, which may hold unfinished work.
 
 ## Step 1 — IMPLEMENTING → VERIFYING: collect local gate evidence
 
@@ -45,6 +87,11 @@ of these gates — do not claim a gate passed without having just run it:
    that change rather than re-stamping the manifest.
 5. **Project test suite**: `python3 factory/guards/run-project-tests.py` — must exit 0 (this is
    what CI will run too).
+6. **Factory's own tests**: `python3 factory/guards/run-factory-tests.py` — must exit 0. Every
+   `factory/guards/test_*.py` and `.claude/hooks/test_*.py` is discovered automatically (audit
+   finding F-19), so a test file you added is executed without being registered anywhere. Read the
+   `SANDBOX_VERIFICATION:` line rather than the pass count: `not_performed` means the OS-sandbox
+   check skipped, which is not evidence that the sandbox protects anything.
 
 Write what you found into the finding's `## Analyse` section as `Verification Evidence` (a
 concise summary with concrete test/guard names and outcomes).

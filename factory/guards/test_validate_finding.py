@@ -310,12 +310,23 @@ class ValidateFindingClosureGateTests(unittest.TestCase):
             f"Review Artifact: {review_path}\n"
         )
 
-    def test_verifying_is_valid_with_verification_evidence_present(self):
+    def test_verifying_without_a_build_order_is_rejected(self):
+        """Inverted, not deleted (audit finding F-10).
+
+        This test used to assert that a finding at VERIFYING is valid as soon
+        as Verification Evidence is present. That was the pre-repair semantics:
+        a finding could pass IMPLEMENTING, VERIFYING and CLOSED with no build
+        order at all, which left the independent reviewer -- who is told to
+        hold the build order against the actual code -- with nothing to hold.
+        The accepting counterpart now lives where it can be expressed
+        honestly, in a real repository with a real build order:
+        factory/guards/test_build_order.py.
+        """
         extra = "Verification Evidence: Regressionstest app.jobs.test_org_scope_regression gruen.\n"
         finding_path = self.write_finding("VERIFYING", extra)
         result = self.run_guard_on(finding_path)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("GÜLTIG", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("Bauauftrag", result.stdout + result.stderr)
 
     def test_ready_for_closure_without_closure_fields_is_rejected(self):
         finding_path = self.write_finding("READY_FOR_CLOSURE", "")
