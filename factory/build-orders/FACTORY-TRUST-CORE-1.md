@@ -133,8 +133,106 @@ EXIT:0
 
 ## Green Runtime Fix Evidence
 
-Wird nach Abschluss der Implementierung mit den tatsächlichen Ausgaben gefüllt (kanonischer
-Runner, Projekttests, vollständige Guard- und Hook-Testsuite, CI-Lauf).
+Alle folgenden Läufe stammen aus dem Zustand, der in diesem Branch reviewt und gemergt wird.
+
+**Trust-Core-Negativtests — dieselben 29 Tests, die vorher 17 Fehlschläge lieferten:**
+
+```
+$ python3 -m unittest factory.guards.test_trust_core
+Ran 29 tests in 3.438s
+OK
+```
+
+**Vollständige Guard-Suite (8 Module):**
+
+```
+$ python3 -m unittest factory.guards.test_validate_finding factory.guards.test_validate_review \
+    factory.guards.test_run_factory_checks factory.guards.test_create_finding_worktree \
+    factory.guards.test_factory_preflight factory.guards.test_trust_core \
+    factory.guards.test_control_plane factory.guards.test_gh_evidence
+Ran 170 tests in 21.266s
+OK
+```
+
+**SubagentStop-/Provenienz-Tests (append-only Runden, Scope-Bindung, verworfene
+Reviewer-Provenienz):**
+
+```
+$ python3 .claude/hooks/test_subagentstop_write_review.py
+Ran 24 tests in 2.479s
+OK
+```
+
+**Stop-Hook-Tests (inkl. P0-Stopp und Control-Plane-Drift):**
+
+```
+$ python3 .claude/hooks/test_stop_validate_findings.py
+Ran 7 tests in 1.640s
+OK
+```
+
+**Sandbox-Live-Schreibprobe gegen das echte `factory/reviews/` — bestanden, nicht
+übersprungen, die OS-Sandbox blockiert also tatsächlich:**
+
+```
+$ python3 .claude/hooks/test_sandbox_protects_reviews.py
+Ran 1 test in 0.028s
+OK
+```
+
+**Zentraler Guard, live gegen das echte Repository.** Nachdem die sechs geschützten
+Control-Plane-Dateien extern übernommen worden waren, meldete der Guard sie namentlich, bevor
+neu gestempelt wurde — das ist der Nachweis, dass er echte Drift erkennt und nicht nur in
+Fixtures funktioniert:
+
+```
+$ python3 factory/guards/validate-control-plane.py
+CONTROL_PLANE_VERAENDERT: die Kontrollebene weicht vom gestempelten Manifest ab.
+  - Inhalt geaendert: .claude/agents/finding-closure-reviewer.md (Manifest 019f1824a6f4…, aktuell cb3872b9ce57…).
+  - Inhalt geaendert: .claude/hooks/subagentstop-write-review.py (Manifest 4d7b704cf1b5…, aktuell eb2faf437d68…).
+  - Inhalt geaendert: .claude/hooks/test_stop_validate_findings.py (Manifest ba909c20c314…, aktuell adc276021592…).
+  - Inhalt geaendert: .claude/hooks/test_subagentstop_write_review.py (Manifest 37191219da47…, aktuell 6dfe7f860f16…).
+  - Inhalt geaendert: .claude/settings.json (Manifest 374a85b42280…, aktuell db4d52581595…).
+  - Inhalt geaendert: .claude/skills/verify-finding/SKILL.md (Manifest 6cf3065d4a30…, aktuell 18b6452a37c9…).
+EXIT:1
+```
+
+Nach bewusstem Neustempeln:
+
+```
+$ python3 factory/guards/validate-control-plane.py --update
+Control-Plane-Manifest neu gestempelt: … (30 Dateien)
+$ python3 factory/guards/validate-control-plane.py
+Control-Plane unveraendert (30 Dateien gegen Manifest geprueft).
+```
+
+**Kanonischer Runner und Projekttests:**
+
+```
+$ python3 factory/guards/run-factory-checks.py
+[OK]     finding-validator: EXAMPLE-FINDING.md
+[OK]     finding-validator: FACTORY-TRUST-CORE-1.md
+[OK]     control-plane-guard: Kontrollebene unveraendert
+Factory-Checks: ALLE BESTANDEN
+
+$ python3 factory/guards/run-project-tests.py
+Kein Projektverzeichnis unter …/app -- nichts zu pruefen.
+```
+
+**Preflight (voll, mit Netz).** Alle Factory- und GitHub-Voraussetzungen grün, inklusive der neu
+geprüften Control-Plane-Sperren und des Manifests. Der einzige offene Punkt ist
+maschinenlokal und nicht Teil der Vorlage (`.claude/settings.local.json` ist gitignored) — er
+belegt zugleich, dass die neue `too_broad`-Prüfung auf echten Daten greift:
+
+```
+[OK]      Geschuetzte Factory-/Review-/Hook-Dateien und Hooks korrekt in .claude/settings.json.
+[FEHLT]   Zu breite lokale Freigaben: Bash(python3 -)
+[OK]      Control-Plane unveraendert gegenueber factory/control-plane.sha256.
+[OK]      Required Status Check 'factory-checks' ist auf main konfiguriert.
+FACTORY_PREFLIGHT: BLOCKED (1 offene Voraussetzung(en))
+```
+
+**Externe CI:** siehe `CI Evidence` im Finding.
 
 ## Bootstrap-Situation (ausdrücklich dokumentiert)
 

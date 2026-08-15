@@ -4,12 +4,20 @@
       "Bash(docker *)",
       "Edit(/factory/reviews/**)",
       "Write(/factory/reviews/**)",
+      "Edit(/factory/guards/**)",
+      "Write(/factory/guards/**)",
+      "Edit(/factory/scripts/**)",
+      "Write(/factory/scripts/**)",
       "Edit(/.claude/hooks/**)",
       "Write(/.claude/hooks/**)",
       "Edit(/.claude/skills/**)",
       "Write(/.claude/skills/**)",
       "Edit(/.claude/agents/**)",
       "Write(/.claude/agents/**)",
+      "Edit(/.claude/rules/**)",
+      "Write(/.claude/rules/**)",
+      "Edit(/.github/workflows/**)",
+      "Write(/.github/workflows/**)",
       "Edit(/.claude/settings.json)",
       "Write(/.claude/settings.json)"
     ]
@@ -20,9 +28,13 @@
     "filesystem": {
       "denyWrite": [
         "./factory/reviews",
+        "./factory/guards",
+        "./factory/scripts",
         "./.claude/hooks",
         "./.claude/skills",
         "./.claude/agents",
+        "./.claude/rules",
+        "./.github/workflows",
         "./.claude/settings.json",
         "./.claude/settings.local.json"
       ]

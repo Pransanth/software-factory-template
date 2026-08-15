@@ -7,14 +7,18 @@ Run with:
 unittest module path like "factory.guards.test_validate_finding" -- running
 the file directly works the same way via its own unittest.main() call.)
 
-Each test builds a throwaway project directory (a copy of the real
-factory/guards/validate-finding.py, run-factory-checks.py and
-validate-review.py, plus one finding file) and points the hook at it via
+Each test builds a throwaway project directory (copies of the real factory
+guards plus one finding file) and points the hook at it via
 CLAUDE_PROJECT_DIR, then invokes the hook exactly the way Claude Code
 does: JSON on stdin, exit code as the result. No real finding and no real
 review artifact of this repository is ever touched -- these throwaway
 projects have no factory/reviews/ directory at all, which
 run-factory-checks.py treats as "nothing to check" for that dimension.
+
+The fixture is a real git repository with a stamped control-plane manifest,
+because the canonical runner now also verifies the control plane (see
+factory/guards/validate-control-plane.py). That check reads `git ls-files`,
+so a bare directory would fail it for the wrong reason.
 """
 import json
 import os
@@ -28,6 +32,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK_SCRIPT = REPO_ROOT / ".claude" / "hooks" / "stop-validate-findings.py"
 REAL_GUARDS_DIR = REPO_ROOT / "factory" / "guards"
+
+GUARD_FILES = (
+    "validate-finding.py",
+    "run-factory-checks.py",
+    "validate-review.py",
+    "validate-control-plane.py",
+    "scope_hash.py",
+)
+
+GIT_ENV_OVERRIDES = {
+    "GIT_AUTHOR_NAME": "Factory Test",
+    "GIT_AUTHOR_EMAIL": "factory-test@example.invalid",
+    "GIT_COMMITTER_NAME": "Factory Test",
+    "GIT_COMMITTER_EMAIL": "factory-test@example.invalid",
+}
 
 VALID_OPEN_FINDING = """\
 # TEST-OPEN
@@ -54,6 +73,7 @@ INVALID_ANALYZED_FINDING = """\
 # TEST-ANALYZED-INCOMPLETE
 
 Status: ANALYZED
+Severity: P1
 
 ## Befund
 
@@ -68,6 +88,7 @@ VALID_ANALYZED_FINDING = """\
 # TEST-ANALYZED-INCOMPLETE
 
 Status: ANALYZED
+Severity: P1
 
 ## Befund
 
@@ -85,22 +106,53 @@ Expected Blast Radius: Nur neue Hintergrundjobs, keine bestehenden Endpunkte.
 Risk Assessment: Gering, da rein additive Pruefung ohne bestehendes Verhalten zu aendern.
 """
 
+# A P0 must never be worked through the normal lifecycle -- the Stop hook
+# has to surface that, because it is the first place a session notices.
+P0_IN_IMPLEMENTING = VALID_ANALYZED_FINDING.replace(
+    "Status: ANALYZED\nSeverity: P1", "Status: IMPLEMENTING\nSeverity: P0"
+)
+
+
+def _git(cwd, *args):
+    env = dict(os.environ)
+    env.update(GIT_ENV_OVERRIDES)
+    result = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed:\n{result.stdout}\n{result.stderr}")
+    return result.stdout.strip()
+
 
 class StopHookTests(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="factory-hook-test-")
         self.addCleanup(shutil.rmtree, self.tmp_dir, ignore_errors=True)
 
-        self.project_root = Path(self.tmp_dir)
+        self.project_root = Path(self.tmp_dir).resolve()
         guards_dir = self.project_root / "factory" / "guards"
         self.findings_dir = self.project_root / "factory" / "findings"
         guards_dir.mkdir(parents=True)
         self.findings_dir.mkdir(parents=True)
-        shutil.copy2(REAL_GUARDS_DIR / "validate-finding.py", guards_dir / "validate-finding.py")
-        shutil.copy2(
-            REAL_GUARDS_DIR / "run-factory-checks.py", guards_dir / "run-factory-checks.py"
+        for name in GUARD_FILES:
+            shutil.copy2(REAL_GUARDS_DIR / name, guards_dir / name)
+
+        _git(self.project_root, "init", "--initial-branch=trunk")
+        _git(self.project_root, "add", "-A")
+        _git(self.project_root, "commit", "-m", "initial")
+        stamp = subprocess.run(
+            [
+                sys.executable,
+                str(guards_dir / "validate-control-plane.py"),
+                "--repo-root",
+                str(self.project_root),
+                "--update",
+            ],
+            capture_output=True,
+            text=True,
         )
-        shutil.copy2(REAL_GUARDS_DIR / "validate-review.py", guards_dir / "validate-review.py")
+        self.assertEqual(stamp.returncode, 0, stamp.stderr)
+
         # Always the same single finding file, its content changes per test
         # to simulate "the finding gets fixed between two stop attempts".
         self.finding_path = self.findings_dir / "finding.md"
@@ -140,6 +192,23 @@ class StopHookTests(unittest.TestCase):
         # comes straight from the canonical runner's own report format.
         self.assertIn("[FEHLER]", result.stderr)
 
+    def test_hook_blocks_stop_on_a_p0_in_the_normal_lifecycle(self):
+        self.write_finding(P0_IN_IMPLEMENTING)
+        result = self.run_hook()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("P0", result.stderr)
+
+    def test_hook_blocks_stop_when_the_control_plane_drifted(self):
+        """A finding run that changed a guard must not end quietly."""
+        self.write_finding(VALID_OPEN_FINDING)
+        guard = self.project_root / "factory" / "guards" / "validate-finding.py"
+        guard.write_text(
+            guard.read_text(encoding="utf-8") + "\n# quietly modified\n", encoding="utf-8"
+        )
+        result = self.run_hook()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("control-plane", result.stderr)
+
     def test_hook_allows_repeat_stop_once_finding_is_actually_fixed(self):
         # First attempt: invalid, gets blocked.
         self.write_finding(INVALID_ANALYZED_FINDING)
@@ -158,14 +227,14 @@ class StopHookTests(unittest.TestCase):
         self.assertNotIn("WARNUNG", second.stdout + second.stderr)
 
     def test_hook_does_not_block_again_on_repeat_stop_even_if_still_invalid(self):
-        # This is the key behavior change: stop_hook_active=True means "this
-        # hook already blocked once for this turn" -- it now exits 0
-        # immediately without even re-running the canonical checks, on
-        # purpose, regardless of whether the underlying state is still
-        # invalid. Loop prevention is this hook's own job now, not a
-        # platform block-cap that turned out not to reliably fire. The real,
-        # unbypassable gate is GitHub CI, not this local hook -- see the
-        # module docstring and factory/README.md.
+        # This is the key behavior: stop_hook_active=True means "this hook
+        # already blocked once for this turn" -- it now exits 0 immediately
+        # without even re-running the canonical checks, on purpose,
+        # regardless of whether the underlying state is still invalid. Loop
+        # prevention is this hook's own job, not a platform block-cap that
+        # turned out not to reliably fire. The real, unbypassable gate is
+        # GitHub CI, not this local hook -- see the module docstring and
+        # factory/README.md.
         self.write_finding(INVALID_ANALYZED_FINDING)
 
         first = self.run_hook(stop_hook_active=False)

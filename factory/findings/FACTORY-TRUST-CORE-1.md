@@ -1,6 +1,6 @@
 # FACTORY-TRUST-CORE-1
 
-Status: IMPLEMENTING
+Status: VERIFYING
 Severity: P1
 
 ## Befund
@@ -37,6 +37,6 @@ Regression Test Plan: Negativtests zuerst, gegen die unveränderten Guards rot b
 Central Guard Plan: Drei zentrale Guards statt punktueller Prüfungen. validate-finding.py erzwingt die achtteilige Closure-Bindung und den P0-Stopp; validate-control-plane.py vergleicht die Kontrollebene gegen factory/control-plane.sha256 und läuft im kanonischen Runner, also in jedem CI-Lauf; gh_evidence.py ist die einzige Stelle, an der GitHub-Antworten interpretiert werden, und ist ohne Netz testbar.
 Expected Blast Radius: Ausschließlich die Factory-Infrastruktur. Kein Produktcode ist betroffen, weil die Vorlage keinen enthält. Für bestehende Kopien ist die Änderung nicht rückwärtskompatibel: Review-Artefakte im alten Format <ID>.md werden abgelehnt, Findings ohne Severity ab ANALYZED ebenfalls, und gh-query.sh merge verlangt jetzt einen dritten Parameter.
 Risk Assessment: Das Risiko der Änderung liegt vor allem in falschem Rot, nicht in falschem Grün: der Scope-Hash bindet an alle getrackten Dateien, sodass eine Änderung nach dem Review konsequent einen neuen Review-Durchgang erzwingt. Das ist gewollt und der Kern der Reparatur, kostet aber eine Review-Runde, wenn nach dem Review noch etwas am Code korrigiert wird. Das Risiko des Nichtstuns ist deutlich höher: ohne diese Bindungen ist ein grünes CLOSED ein Formular ohne Beweiswert, und die Factory wäre als Basis für reale Sicherheitsarbeit ungeeignet.
-Verification Evidence: Not yet analyzed
+Verification Evidence: Regression zuerst rot: 17 von 29 Tests in factory.guards.test_trust_core schlugen gegen die unveraenderten Guards fehl, jeweils mit "guard accepted what it must reject" (Details im Bauauftrag, Abschnitt Red Regression Evidence). Danach gruen: test_trust_core 29/29; vollstaendige Guard-Suite ueber acht Module 170/170 (test_validate_finding, test_validate_review, test_run_factory_checks, test_create_finding_worktree, test_factory_preflight, test_trust_core, test_control_plane, test_gh_evidence); .claude/hooks/test_subagentstop_write_review.py 24/24; .claude/hooks/test_stop_validate_findings.py 7/7; .claude/hooks/test_sandbox_protects_reviews.py 1/1 bestanden (nicht uebersprungen, die OS-Sandbox blockiert den Schreibzugriff auf factory/reviews/ also real). Zentraler Guard live gegen das echte Repository: validate-control-plane.py meldete nach dem externen Uebernehmen der sechs geschuetzten Dateien genau diese sechs namentlich (Exit 1) und nach bewusstem --update wieder "Kontrollebene unveraendert" (30 Dateien). Kanonischer Runner ALLE BESTANDEN (Exit 0), run-project-tests.py Exit 0. Voller Preflight mit Netz: alle Factory- und GitHub-Voraussetzungen gruen inklusive Control-Plane-Sperren, Manifest und Required Status Check; einziger offener Punkt ist die maschinenlokale, gitignorierte .claude/settings.local.json (Bash(python3 -)), was zugleich belegt, dass die neue too_broad-Pruefung auf echten Daten greift.
 CI Evidence: Not yet analyzed
 Review Artifact: Not yet analyzed

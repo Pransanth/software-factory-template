@@ -4,9 +4,10 @@
 This is the ONLY place a review artifact under factory/reviews/ is allowed to
 come from. It reacts exclusively to the SubagentStop event for the
 finding-closure-reviewer subagent (see .claude/agents/finding-closure-reviewer.md)
-and writes factory/reviews/<Finding>.md directly from the real Claude Code
-event data for that run -- agent_type, agent_id, last_assistant_message --
-never from anything the implementing (main) agent claims about the review.
+and writes factory/reviews/<Finding>.round-<N>.md directly from the real
+Claude Code event data for that run -- agent_type, agent_id,
+last_assistant_message -- never from anything the implementing (main) agent
+claims about the review.
 
 Why this exists: before this hook, the verify-finding skill instructed the
 implementing agent to "transcribe verbatim" the reviewer's answer into the
@@ -19,6 +20,27 @@ not by the implementing agent re-typing what it remembers the subagent said.
 factory/reviews/ is additionally denied to the Edit/Write tools in
 .claude/settings.json so the implementing agent cannot bypass this by hand.
 
+Two properties this hook adds on top of that, both from the factory audit:
+
+  - **Append-only rounds (F-04).** The hook never overwrites an existing
+    review artifact. It writes the next free round number,
+    <Finding>.round-<N>.md. Previously every round overwrote the last, so a
+    FAIL could be replaced by a PASS with no trace -- which meant simply
+    re-running a stochastic reviewer until it agreed was both possible and
+    invisible. Now every round survives, and validate-finding.py refuses a
+    PASS whose scope hash matches an earlier non-PASS round.
+
+  - **Scope binding (F-03).** The hook stamps `Reviewed Scope Hash` into the
+    artifact, computed by factory/guards/scope_hash.py from the repository's
+    actual tracked files at the moment the reviewer finished. This value is
+    NOT taken from the reviewer's text and NOT from the implementing agent;
+    like the provenance fields, only this hook sets it. validate-finding.py
+    recomputes it at closure time, so a PASS stops being valid as soon as the
+    reviewed code changes.
+    If the scope hash cannot be computed, NO artifact is written. A review
+    that cannot be bound to a code state is worse than no review, because it
+    would look exactly like a valid one.
+
 Honest limits, stated plainly (do not oversell this):
   - This is a guard against a normal or accidental agentic bypass. It is NOT
     cryptographic attestation. A local user with filesystem access, or an
@@ -27,10 +49,10 @@ Honest limits, stated plainly (do not oversell this):
     is outside what any Claude Code hook or permission rule can prevent.
   - This hook itself does not judge review CONTENT -- it only refuses to
     fabricate or infer a result from unparseable input. Content-level
-    structural checks (are all fields present in the artifact, is Result one
-    of the three allowed values, does the provenance match the one valid
-    reviewer agent type) remain factory/guards/validate-review.py's job, run
-    by the canonical runner exactly as before.
+    structural checks (are all fields present, is Result one of the three
+    allowed values, is the file name canonical, does the provenance match the
+    one valid reviewer agent type) remain factory/guards/validate-review.py's
+    job, run by the canonical runner exactly as before.
 
 Behavior:
   - agent_type != "finding-closure-reviewer": silent no-op, exit 0. (Belt and
@@ -44,10 +66,10 @@ Behavior:
     exactly one of PASS / FAIL / EXPERT_REVIEW_REQUIRED, or Finding is not a
     safe filename token: malformed, no artifact is written (specifically: no
     PASS is ever produced from unparseable input), exit 2 with diagnostics.
-  - Otherwise: factory/reviews/<Finding>.md is written (overwriting any prior
-    round for the same finding, matching the existing verify-finding workflow)
-    with the reviewer's 10 fields plus two fields this hook alone sets:
-    "Reviewer Agent Type" and "Reviewer Agent ID", taken from the event data.
+  - the scope hash cannot be computed: no artifact is written, exit 2.
+  - Otherwise: factory/reviews/<Finding>.round-<N>.md is written with the
+    reviewer's 10 fields plus three fields this hook alone sets:
+    "Reviewer Agent Type", "Reviewer Agent ID" and "Reviewed Scope Hash".
     Exit 0.
 
 See https://code.claude.com/docs/en/hooks.md for the SubagentStop hook
@@ -90,6 +112,7 @@ EXPECTED_AGENT_TYPE = "finding-closure-reviewer"
 FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 FIELD_LINE_RE = re.compile(r"^([A-Za-z][A-Za-z ]*?):\s*(.*)$")
 FINDING_TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ROUND_FILENAME_RE = re.compile(r"^(?P<finding>[A-Za-z0-9._-]+)\.round-(?P<round>[1-9][0-9]*)\.md$")
 
 
 def project_root():
@@ -98,6 +121,20 @@ def project_root():
         return Path(env_root)
     # Fallback for manual/local runs: this file lives at <root>/.claude/hooks/.
     return Path(__file__).resolve().parents[2]
+
+
+def load_scope_hash(root):
+    """Compute the scope hash using the factory's own canonical implementation.
+
+    Imported from factory/guards/ rather than reimplemented here, so the hook
+    that stamps the value and the guard that verifies it can never drift apart.
+    """
+    guards_dir = str((root / "factory" / "guards").resolve())
+    if guards_dir not in sys.path:
+        sys.path.insert(0, guards_dir)
+    import scope_hash
+
+    return scope_hash.compute_scope_hash(root)[0]
 
 
 def extract_last_fenced_block(text):
@@ -148,7 +185,22 @@ def validate_fields(fields):
     return errors
 
 
-def build_artifact_text(fields, agent_type, agent_id):
+def next_round_number(review_dir, finding):
+    """The next free round number for this finding -- never an existing one.
+
+    Rounds are append-only: this only ever counts upwards from whatever is
+    already on disk, so no previous round can be overwritten or reused.
+    """
+    highest = 0
+    if review_dir.is_dir():
+        for candidate in review_dir.iterdir():
+            match = ROUND_FILENAME_RE.match(candidate.name)
+            if match and match.group("finding") == finding:
+                highest = max(highest, int(match.group("round")))
+    return highest + 1
+
+
+def build_artifact_text(fields, agent_type, agent_id, scope_hash_value):
     lines = [
         f"# {fields['Finding']}",
         "",
@@ -157,6 +209,7 @@ def build_artifact_text(fields, agent_type, agent_id):
         f"Reviewer Agent Type: {agent_type}",
         f"Reviewer Agent ID: {agent_id}",
         f"Reviewed Commit: {fields['Reviewed Commit']}",
+        f"Reviewed Scope Hash: {scope_hash_value}",
         f"Result: {fields['Result']}",
         f"Root Cause Addressed: {fields['Root Cause Addressed']}",
         f"Regression Evidence Checked: {fields['Regression Evidence Checked']}",
@@ -212,14 +265,39 @@ def main():
         return fail("Malformed Reviewer-Ausgabe:\n" + "\n".join(f"  - {e}" for e in errors))
 
     root = project_root()
+
+    try:
+        scope_hash_value = load_scope_hash(root)
+    except Exception as exc:  # noqa: BLE001 -- reported verbatim, never swallowed
+        return fail(
+            "Scope-Hash konnte nicht bestimmt werden, deshalb wird kein Review-Artefakt "
+            "geschrieben (ein nicht bindbares Review waere von einem gueltigen nicht "
+            f"unterscheidbar): {exc}"
+        )
+
     review_dir = root / "factory" / "reviews"
     review_dir.mkdir(parents=True, exist_ok=True)
-    review_path = review_dir / f"{fields['Finding']}.md"
-    review_path.write_text(build_artifact_text(fields, agent_type, agent_id), encoding="utf-8")
+    finding = fields["Finding"]
+    round_number = next_round_number(review_dir, finding)
+    review_path = review_dir / f"{finding}.round-{round_number}.md"
+
+    if review_path.exists():
+        # Cannot happen with next_round_number, but an append-only guarantee
+        # is worth an explicit check rather than a comment.
+        return fail(
+            f"{review_path} existiert bereits. Review-Runden sind append-only und "
+            "werden niemals ueberschrieben."
+        )
+
+    review_path.write_text(
+        build_artifact_text(fields, agent_type, agent_id, scope_hash_value),
+        encoding="utf-8",
+    )
 
     print(
         f"SubagentStop-Hook: Review-Artefakt geschrieben: {review_path} "
-        f"(Result: {fields['Result']}, Reviewer Agent ID: {agent_id})"
+        f"(Runde {round_number}, Result: {fields['Result']}, "
+        f"Reviewer Agent ID: {agent_id}, Scope-Hash: {scope_hash_value})"
     )
     return 0
 
