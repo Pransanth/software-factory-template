@@ -55,6 +55,15 @@
 #       "AUTONOMY_BLOCKER: ..." to stderr, and exits 1. The worktree is
 #       never left behind for use.
 #
+#       Idempotent on resume (audit finding F-16): if <path> already exists,
+#       nothing is created and nothing is ever deleted. It prints
+#       "WORKTREE_EXISTS ..." (same branch, expected HEAD -- reuse it),
+#       "WORKTREE_EXISTS_MOVED ..." (same branch, HEAD has moved on, so
+#       existing CI/review evidence belongs to the old state and must be
+#       re-derived), or "AUTONOMY_BLOCKER: ..." with exit 1 (different
+#       branch, or not a readable worktree). Deleting an existing worktree
+#       could destroy unfinished work, so the script never does it.
+#
 # Typical caller sequence -- two separate, simple commands run from the
 # repository root (no command substitution, no subshell, no pipeline): run
 # `resolve`, read the SHA it printed, then pass that SHA literally to
@@ -95,6 +104,44 @@ case "$SUBCOMMAND" in
     EXPECTED_SHA="$2"
     WT_PATH="$3"
     BRANCH="$4"
+
+    # --- Resume: the worktree may already exist (audit finding F-16) -------
+    #
+    # A session can die between creating a worktree and finishing the work in
+    # it. Before this, `create` simply ran `git worktree add` and failed with
+    # git's own "already exists" error, which tells a resuming agent nothing
+    # about whether the existing worktree is the right one to continue in.
+    #
+    # Nothing is ever deleted here. An existing worktree may hold unfinished
+    # work, and "clean it up and start over" is exactly the destructive guess
+    # this check exists to prevent. The three outcomes are:
+    #   - same branch, expected HEAD  -> WORKTREE_EXISTS, exit 0, reuse it
+    #   - same branch, moved HEAD     -> WORKTREE_EXISTS_MOVED, exit 0, but
+    #                                    the caller must re-derive its own
+    #                                    evidence for that HEAD, not carry the
+    #                                    old one forward
+    #   - different branch / unusable -> AUTONOMY_BLOCKER, exit 1
+    if [ -e "$WT_PATH" ]; then
+      if ! EXISTING_SHA="$(git -C "$WT_PATH" rev-parse HEAD 2>/dev/null)"; then
+        echo "AUTONOMY_BLOCKER: $WT_PATH existiert bereits, ist aber kein lesbarer git-Worktree. Nicht geloescht -- ein Mensch muss entscheiden, was dort liegt." >&2
+        exit 1
+      fi
+      EXISTING_BRANCH="$(git -C "$WT_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null)" || EXISTING_BRANCH=""
+
+      if [ "$EXISTING_BRANCH" != "$BRANCH" ]; then
+        echo "AUTONOMY_BLOCKER: $WT_PATH existiert bereits auf Branch '$EXISTING_BRANCH', erwartet war '$BRANCH'. Nicht geloescht und nicht verwendet -- der Worktree kann unfertige Arbeit eines anderen Findings enthalten." >&2
+        exit 1
+      fi
+
+      if [ "$EXISTING_SHA" = "$EXPECTED_SHA" ]; then
+        echo "WORKTREE_EXISTS $WT_PATH $BRANCH $EXISTING_SHA"
+        exit 0
+      fi
+
+      echo "WORKTREE_EXISTS_MOVED $WT_PATH $BRANCH $EXISTING_SHA (erwartete Basis: $EXPECTED_SHA)"
+      echo "hinweis: der Worktree gehoert zu diesem Finding, sein HEAD ist aber weitergewandert -- vermutlich liegt dort bereits committete Arbeit. Nicht geloescht. Vorhandene CI-/Review-Evidence gilt fuer den alten Stand und muss fuer $EXISTING_SHA neu erhoben werden."
+      exit 0
+    fi
 
     DEFAULT_BRANCH="$(resolve_default_branch)"
 

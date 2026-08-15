@@ -33,14 +33,31 @@ factory/scripts/factory-preflight.sh
 
 Der Preflight prüft deterministisch alle Voraussetzungen (eigenes Repo, `origin`, Default-Branch,
 repo-spezifisches GitHub-Credential, GitHub-API, `gh-api.sh`, `gh-query.sh`, PR-Rechte,
-CI-Lesbarkeit, Branch-Schutz, Required Status Check, lokale Allows, geschützte Dateien) und endet
-mit `FACTORY_PREFLIGHT: PASS` oder `FACTORY_PREFLIGHT: BLOCKED` samt der exakt fehlenden
-einmaligen Schritte. Er ändert **nichts** und automatisiert bewusst nichts, was aus
-Sicherheitsgründen menschlich bleiben muss (Token-Erstellung, GitHub-Admin/Ruleset, Vergabe
-lokaler Berechtigungen). Details: [`factory/ONBOARDING.md`](factory/ONBOARDING.md).
+CI-Lesbarkeit, Branch-Schutz, Required Status Check, lokale Allows, geschützte Dateien) und
+**führt die Factory tatsächlich aus** — Control-Plane-Guard, kanonischer Runner und die
+automatisch entdeckte Testsuite. Ein Repository, dessen Pflichtdateien nur Platzhalter sind,
+besteht ihn nicht.
+
+Er endet mit genau einem von drei Ergebnissen:
+
+| Ergebnis | Exit | Bedeutung |
+|---|---|---|
+| `FACTORY_PREFLIGHT: PASS` | 0 | Lokale **und** GitHub-/Remote-Ebene geprüft; unbeaufsichtigte Läufe sind bereit. |
+| `FACTORY_PREFLIGHT: BLOCKED` | 1 | Mindestens eine Voraussetzung fehlt; jede wird mit dem exakten einmaligen Schritt genannt. |
+| `FACTORY_PREFLIGHT: PARTIAL` | 3 | Nur mit `--local-only`: die lokale Ebene ist in Ordnung, die GitHub-Ebene wurde **nicht geprüft**. Das ist ausdrücklich kein PASS. |
+
+`PARTIAL` existiert, weil `--local-only` früher `PASS` meldete und damit ein Urteil über eine
+Ebene fällte, die es nie betreten hatte. Eine nicht geprüfte Ebene ist keine bestandene Ebene.
+
+Er ändert **nichts** und automatisiert bewusst nichts, was aus Sicherheitsgründen menschlich
+bleiben muss (Token-Erstellung, GitHub-Admin/Ruleset, Vergabe lokaler Berechtigungen). Details:
+[`factory/ONBOARDING.md`](factory/ONBOARDING.md).
 
 Ist der Preflight `BLOCKED`: die genannten Schritte melden, **nicht** umgehen, **nicht** durch
-breitere Berechtigungen ersetzen — und danach den Preflight erneut ausführen.
+breitere Berechtigungen ersetzen — und danach den Preflight erneut ausführen. Meldet er einen
+`[GOVERNANCE]`-Punkt (z. B. erforderliche Approvals auf dem Default-Branch), ist das keine
+technische Aufgabe: der Projektinhaber entscheidet, ob die Factory autonom mergen darf oder ob
+der letzte Schritt menschlich bleibt. Ein technischer Workaround dafür wird nicht gebaut.
 
 ## Grundregel: Sicherheitsbefunde nicht direkt reparieren
 
@@ -59,6 +76,26 @@ Zusätzlich existiert der Eskalationszustand `EXPERT_REVIEW_REQUIRED` (siehe unt
 Anforderungen an jeden Zustand stehen in [`.claude/rules/factory-workflow.md`](.claude/rules/factory-workflow.md).
 Der standardisierte Weg von `IMPLEMENTING` bis `CLOSED` inklusive Push, PR, echter CI und Merge
 ist der [`verify-finding`-Skill](.claude/skills/verify-finding/SKILL.md).
+
+**Ab `IMPLEMENTING` braucht jedes Finding einen gültigen Bauauftrag** unter
+`factory/build-orders/<Finding-ID>.md`. Das ist keine Konvention mehr, sondern eine technische
+Bedingung: [`factory/guards/validate-build-order.py`](factory/guards/validate-build-order.py)
+prüft Pfad, gegenseitige Bindung an das Finding, die Pflichtabschnitte, Platzhalter und —
+abhängig vom Status — ob die Evidence-Abschnitte einen tatsächlich zitierten Lauf enthalten. Der
+kanonische Runner führt ihn aus, also auch jede CI. Der Grund ist nicht Formalismus: der
+unabhängige Reviewer soll ausdrücklich kein eigenes Sicherheitsmodell erfinden, sondern den
+Bauauftrag gegen den echten Code halten — ohne Bauauftrag hält er nichts.
+
+**Nach einem Abbruch wird der Zustand ermittelt, nicht geraten.** Stirbt eine Session mitten im
+Lauf, beantwortet
+[`factory/guards/finding_state.py`](factory/guards/finding_state.py) `assess <ID>`
+deterministisch, was schon passiert ist: existiert der Branch, ist der zuletzt gepushte Stand
+noch der aktuelle, gibt es einen Pull Request, deckt die CI-Evidence den heutigen Head, deckt das
+letzte Review den heutigen Scope-Hash. Ergänzend liefert
+`factory/scripts/gh-query.sh pr-for-branch <BRANCH>` die GitHub-Sicht (auch „bereits gemergt"),
+und `create-finding-worktree.sh create` ist idempotent: ein bereits vorhandener Worktree wird
+geprüft und gemeldet, nie gelöscht. **Veraltete Evidence gilt dabei als ungültig, nicht als
+vorhanden** — ein „grün" von vor drei Commits ist kein Beleg für den heutigen Stand.
 
 ## Technische Entscheidungen trifft Claude selbst
 
@@ -108,7 +145,7 @@ geschützt:
 factory/reviews/**       factory/guards/**        factory/scripts/**
 .claude/hooks/**         .claude/agents/**        .claude/skills/**
 .claude/rules/**         .claude/settings*.json   .github/workflows/**
-CLAUDE.md
+CLAUDE.md                factory/control-plane.sha256
 ```
 
 Der Schutz ist zweischichtig: lokal über `permissions.deny` und `sandbox.filesystem.denyWrite`
@@ -118,6 +155,26 @@ diese Pfade in jedem CI-Lauf gegen das gestempelte Manifest `factory/control-pla
 prüft. Ein Finding, das diese Pfade anfassen will, ist per Definition außerhalb seines Scopes;
 eine beabsichtigte Änderung daran ist ein **`FACTORY_CHANGE`** mit eigenem, strengerem Ablauf
 (siehe [`.claude/rules/factory-workflow.md`](.claude/rules/factory-workflow.md)).
+
+**Was „zweischichtig" genau heißt — und wo es das nicht heißt.** Der unabhängige Review von
+`FACTORY-TRUST-CORE-1` hat zu Recht beanstandet, dass dieser Satz mehr versprach, als die
+Konfiguration hielt: `CLAUDE.md` und `factory/control-plane.sha256` standen in der Liste oben,
+aber in keinem `deny`- und keinem `denyWrite`-Eintrag. Beide sind jetzt lokal gesperrt, der Satz
+stimmt also für jeden Pfad der Liste. Zwei Einschränkungen bleiben und werden nicht
+weggeschrieben:
+
+- **Das Manifest kann sich nicht selbst hashen.** Für `factory/control-plane.sha256` existiert
+  die serverseitige Schicht naturgemäß nicht; dort wirken die lokale Sperre und die Sichtbarkeit
+  im Diff. Deshalb ist auch ein `--update` des Manifests kein Routinebefehl mehr, den die Session
+  selbst absetzen kann — er gehört in den bewussten, extern angewandten `FACTORY_CHANGE`-Schritt.
+- **Wer beides im selben Commit ändert, besteht den Guard.** Das ist die dokumentierte
+  Bootstrap-Grenze (siehe `validate-control-plane.py` und `.claude/rules/factory-workflow.md`),
+  keine Lücke, die diese Zeilen schließen könnten. Was der Guard leistet, ist der Wechsel von
+  stiller Drift zu einem Manifest-Diff, den ein Review nicht übersehen kann.
+
+Die lokale Schicht ist außerdem *lokal*: sie gilt auf der Maschine, auf der Claude Code läuft,
+und sagt nichts darüber, was in einem Pull Request ankommt. Verbindlich ist die serverseitige
+Prüfung. Der Preflight prüft beide Schichten und meldet fehlende Einträge namentlich.
 
 Auch die richtige Reaktion auf eine Approval-Abfrage ist **nie**, die Berechtigungen zu
 erweitern, sondern den Befehl in die unten beschriebene einfache Form zu bringen.
@@ -284,6 +341,40 @@ erzeugt genau die Approval-Abfrage, die diese Skripte vermeiden.
 
 Ein API-Fehler (401, 403, 404, 422, 429, 5xx, Netzwerk) ist **niemals** ein leerer Normalzustand:
 alle Helfer melden `api_error:` und enden mit einem Exit-Code ungleich 0.
+
+### Der Merge kann eine menschliche Bestätigung verlangen — das ist eine Plattformgrenze
+
+Beim Abschluss von `FACTORY-TRUST-CORE-1` wurde der kanonische Befehl
+
+```
+factory/scripts/gh-query.sh merge <PR> squash <ERWARTETER-HEAD-SHA>
+```
+
+vom Auto-Mode-Klassifikator von Claude Code abgelehnt, obwohl er bereits die vorgesehene
+einfache, allowlistete Form hatte. Die Analyse dazu, mit dem, was in derselben Sitzung
+beobachtbar war:
+
+- **Es lag nicht an der Schreibweise und nicht an der Allowlist.** Jeder andere Unterbefehl
+  desselben Skripts — `pr-summary`, `required-check`, `check-runs-summary`, `default-branch`,
+  `actions-run-summary` — lief in derselben Sitzung ohne jede Rückfrage durch, gedeckt von
+  demselben Präfixmuster `Bash(factory/scripts/gh-query.sh *)`. Blockiert wurde ausschließlich
+  `merge`.
+- **Der Klassifikator urteilt also über die Wirkung, nicht über die Form.** Ein Merge auf einen
+  geschützten Default-Branch ist die einzige nach außen wirkende, praktisch irreversible Aktion
+  der gesamten Pipeline. Dass eine Plattformschicht dafür eine menschliche Bestätigung will, ist
+  nachvollziehbar.
+- **Repo-lokal ist das nicht sauber vermeidbar.** Es gäbe nur unzulässige Wege: breite
+  `Bash`-/`git`-/`curl`-/`python3`-Freigaben, eine Lockerung der Sandbox, Eingriffe in globale
+  Claude-Einstellungen oder ein selbstgebauter Merge-Pfad an `gh-query.sh merge` vorbei. Jeder
+  davon würde genau die Kontrolle entfernen, deretwegen der Merge-Gate existiert. Deshalb wird
+  keiner davon gebaut.
+
+**Konsequenz für den Betrieb:** Der Merge ist der eine Routineschritt, der eine menschliche
+Bestätigung erfordern kann. Die Factory umgeht das nicht, sondern hält davor sauber an und nennt
+den exakten Befehl inklusive erwartetem Head-SHA. Was das Risiko begrenzt, ist bereits gebaut:
+der Merge ist per F-08 an genau diesen SHA gebunden — der Mensch bestätigt damit exakt den
+reviewten Stand, und ein zwischenzeitlich eingetroffener Push lässt den Merge serverseitig
+scheitern statt mitzureisen.
 
 Verbindlich ist der **Required Status Check** auf dem geschützten Default-Branch (Job `factory-checks`
 aus [`.github/workflows/factory-ci.yml`](.github/workflows/factory-ci.yml)). Ein roter CI-Lauf

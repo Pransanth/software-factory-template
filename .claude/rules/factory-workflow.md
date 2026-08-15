@@ -63,6 +63,27 @@ ausgefüllt sein:
 Diese Felder bleiben in allen späteren Zuständen (`IMPLEMENTING` usw.) weiterhin Pflicht, da die
 Analyse dort weiter gültig sein muss.
 
+### Der Bauauftrag ab `IMPLEMENTING` (Audit-Befund F-10)
+
+Ab `IMPLEMENTING` verlangt der Guard zusätzlich einen **gültigen Bauauftrag** unter
+`factory/build-orders/<Finding-ID>.md` — nicht nur seine Existenz. Er muss
+[`validate-build-order.py`](../../factory/guards/validate-build-order.py) vollständig bestehen:
+kanonischer Ort, gegenseitige Bindung an genau dieses Finding, alle sechs Pflichtabschnitte, keine
+Platzhalter, und Evidence-Abschnitte mit einem tatsächlich zitierten Lauf (ab `IMPLEMENTING` die
+rote Regression, ab `VERIFYING` zusätzlich der grüne Lauf). Die genauen Regeln stehen in
+[`factory/build-orders/README.md`](../../factory/build-orders/README.md); der kanonische Runner
+führt den Guard aus, also auch jede CI.
+
+Warum das eine technische Regel sein muss und keine Konvention bleiben kann: der unabhängige
+Reviewer ist ausdrücklich angewiesen, **kein eigenes Sicherheitsmodell zu erfinden**, sondern den
+Bauauftrag gegen den tatsächlichen Code zu halten. Ohne Bauauftrag hat diese Anweisung keinen
+Gegenstand, und der Review verfällt stillschweigend zu „sieht für mich in Ordnung aus" — genau zu
+dem, was die unabhängige Prüfung verhindern soll.
+
+`OPEN`, `ANALYZED` und `EXPERT_REVIEW_REQUIRED` verlangen keinen Bauauftrag. Er entsteht nach
+`ANALYZED`, und die Eskalation muss aus jedem Zustand erreichbar bleiben — auch aus einem, in dem
+noch keiner existieren kann.
+
 ### `EXPERT_REVIEW_REQUIRED`
 
 Dieser Zustand ist von den acht `ANALYZED`-Pflichtfeldern befreit — die Eskalation kann jederzeit
@@ -145,6 +166,40 @@ notwendig, damit der Workflow selbst funktioniert: nach dem Review werden `Revie
 was ein Reviewer inhaltlich beurteilt — Produktcode, Tests, Guards, Skripte, Hooks, CI-Workflow,
 Bauaufträge — liegt **innerhalb** des Hashes.
 
+#### Gegen welchen Baum verglichen wird — und warum das nicht immer der aktuelle ist
+
+Punkt 7 oben („`Reviewed Scope Hash` entspricht dem aktuellen Scope-Hash") war in der ersten
+Fassung wörtlich gemeint: der Guard berechnete den Hash immer aus dem **Arbeitsbaum**. Für ein
+Finding auf dem Weg in die Closure ist das genau richtig. Für ein bereits abgeschlossenes Finding
+ist es falsch, und der Fehler ist gravierend:
+
+`FACTORY-TRUST-CORE-1` war reviewt, CI-grün, gemergt und `CLOSED`. Die erste beliebige Änderung
+danach — also das, was das nächste Finding per Definition tut — bewegte den Scope-Hash, und damit
+wurde diese abgeschlossene Closure ungültig. `validate-finding.py`, der kanonische Runner und die
+CI wurden rot für Arbeit, mit der das Finding nichts zu tun hatte. **Nach der ersten Closure war
+die Factory faktisch schreibgeschützt.**
+
+Die Regel lautet deshalb jetzt genauer, ohne die Bindung zu lockern:
+
+- **`READY_FOR_CLOSURE`** — Vergleich gegen den **aktuellen** Stand, unverändert. Das ist das
+  Live-Gate: ein Finding darf den Zustand, aus dem heraus gemergt wird, nur erreichen, wenn das
+  Review den Code abdeckt, der gemergt wird.
+- **`CLOSED`** — der aktuelle Stand **oder** der Baum eines Commits, der dieses Finding oder sein
+  eigenes Review-Artefakt tatsächlich verändert hat, berechnet mit
+  `scope_hash.compute_scope_hash_at()` direkt aus Gits Objektspeicher.
+
+Der Hash muss weiterhin exakt einem Baum entsprechen, und dieser Baum kommt aus git, nicht aus
+einer Behauptung in einer Datei. Ein `PASS`, das nie einem Zustand entsprach, in dem dieses
+Finding geschlossen wurde, passt zu keinem dieser Commits und wird weiterhin abgelehnt. Die
+Alternative — „`CLOSED` überspringt die Scope-Prüfung" — wäre die bequeme Variante gewesen und ist
+durch [`factory/guards/test_closure_history.py`](../../factory/guards/test_closure_history.py)
+ausdrücklich ausgeschlossen.
+
+Praktische Folge: die CI muss die Historie kennen. `.github/workflows/factory-ci.yml` checkt
+deshalb mit `fetch-depth: 0` aus; mit dem Standard-Shallow-Checkout gäbe es die betreffenden
+Commits im Runner nicht, und jedes früher gemergte Finding würde dort scheitern, während es lokal
+besteht.
+
 Der standardisierte Ablauf dorthin ist der [`verify-finding`-Skill](../skills/verify-finding/SKILL.md);
 das Review selbst führt der unabhängige, rein lesende
 [`finding-closure-reviewer`-Subagent](../agents/finding-closure-reviewer.md) in einem
@@ -173,12 +228,18 @@ Evidence für so eine Entscheidung erzeugt:
 factory/guards/**        factory/scripts/**       .claude/hooks/**
 .claude/agents/**        .claude/skills/**        .claude/rules/**
 .claude/settings*.json   .github/workflows/**     CLAUDE.md
+factory/control-plane.sha256
 ```
 
 **Normale Finding-Arbeit verändert diese Pfade nicht.** Sie sind lokal per `permissions.deny`
-und `sandbox.filesystem.denyWrite` gesperrt, und — wichtiger, weil serverseitig — sie werden vom
-Guard [`validate-control-plane.py`](../../factory/guards/validate-control-plane.py) gegen das
-gestempelte Manifest `factory/control-plane.sha256` geprüft. Dieser Guard läuft im kanonischen
+und `sandbox.filesystem.denyWrite` gesperrt — seit dem Operational-Robustness-Paket auch
+`CLAUDE.md` und `factory/control-plane.sha256`, die der Trust-Core-Review zu Recht als Lücke
+zwischen Anspruch und Konfiguration benannt hatte — und, wichtiger, weil serverseitig, sie werden
+vom Guard [`validate-control-plane.py`](../../factory/guards/validate-control-plane.py) gegen das
+gestempelte Manifest `factory/control-plane.sha256` geprüft. Für das Manifest selbst existiert
+diese zweite Schicht naturgemäß nicht — es kann seinen eigenen Hash nicht enthalten. Deshalb ist
+`validate-control-plane.py --update` auch kein Befehl mehr, den die Session selbst absetzt: er
+gehört in den bewussten, extern angewandten `FACTORY_CHANGE`-Schritt. Dieser Guard läuft im kanonischen
 Runner und damit in jedem CI-Lauf. Ein Branch, der einen Guard abschwächt, fällt dadurch auf,
 statt vom abgeschwächten Guard selbst geprüft zu werden.
 

@@ -90,7 +90,16 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from scope_hash import ScopeHashError, compute_scope_hash  # noqa: E402
+from scope_hash import (  # noqa: E402
+    ScopeHashError,
+    compute_scope_hash,
+    compute_scope_hash_at,
+)
+
+# How far back the closure gate looks for the historical state a CLOSED
+# finding was reviewed against. Only commits that actually touched this
+# finding or its review artifact are considered, so this bound is generous.
+MAX_CLOSURE_HISTORY_COMMITS = 50
 
 ALLOWED_STATUSES = {
     "OPEN",
@@ -146,6 +155,18 @@ REQUIRED_CLOSURE_FIELDS = [
     "Review Artifact",
 ]
 
+# From IMPLEMENTING onwards a finding must have a valid build order (audit
+# finding F-10). The build order is written after ANALYZED, so ANALYZED itself
+# does not require one, and EXPERT_REVIEW_REQUIRED must stay reachable from a
+# state where none could exist yet. What "valid" means is defined and enforced
+# by factory/guards/validate-build-order.py, not restated here.
+STATUSES_REQUIRING_BUILD_ORDER = {
+    "IMPLEMENTING",
+    "VERIFYING",
+    "READY_FOR_CLOSURE",
+    "CLOSED",
+}
+
 ALLOWED_SEVERITIES = ["P0", "P1", "P2", "P3"]
 
 # Severity must be declared before any work is planned on a finding.
@@ -176,7 +197,9 @@ ROUND_FILENAME_RE = re.compile(r"^(?P<finding>[A-Za-z0-9._-]+)\.round-(?P<round>
 # factory/guards/validate-finding.py -> parents[0]=guards, [1]=factory, [2]=repo root
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REVIEWS_DIR = REPO_ROOT / "factory" / "reviews"
+BUILD_ORDERS_DIR = REPO_ROOT / "factory" / "build-orders"
 REVIEW_GUARD = Path(__file__).resolve().parent / "validate-review.py"
+BUILD_ORDER_GUARD = Path(__file__).resolve().parent / "validate-build-order.py"
 
 
 def parse_finding(text):
@@ -244,9 +267,58 @@ def validate_finding(parsed, finding_path):
     if status == "EXPERT_REVIEW_REQUIRED":
         errors.extend(_check_required_fields(fields, REQUIRED_EXPERT_REVIEW_FIELDS))
 
+    if status in STATUSES_REQUIRING_BUILD_ORDER:
+        errors.extend(_check_build_order(finding_path))
+
     if status in STATUSES_REQUIRING_CLOSURE_EVIDENCE:
         errors.extend(_check_required_fields(fields, REQUIRED_CLOSURE_FIELDS))
-        errors.extend(_check_review_artifact(fields, finding_path))
+        errors.extend(_check_review_artifact(fields, finding_path, status))
+
+    return errors
+
+
+def _check_build_order(finding_path):
+    """From IMPLEMENTING onwards, this finding's own build order must exist
+    and pass factory/guards/validate-build-order.py (audit finding F-10).
+
+    Existence alone is deliberately not enough: an empty shell of headings
+    would satisfy "there is a build order" while giving the independent
+    reviewer nothing to hold the code against."""
+    errors = []
+    finding_id = finding_path.stem
+    relative = f"factory/build-orders/{finding_id}.md"
+    build_order_path = BUILD_ORDERS_DIR / f"{finding_id}.md"
+
+    if not build_order_path.is_file():
+        errors.append(
+            f"Bauauftrag fehlt: '{relative}'. Ab Status IMPLEMENTING braucht jedes "
+            "Finding seinen eigenen Bauauftrag -- er ist die Grundlage, gegen die der "
+            "unabhaengige Reviewer den tatsaechlichen Code haelt. Siehe "
+            "factory/build-orders/README.md."
+        )
+        return errors
+
+    if not BUILD_ORDER_GUARD.is_file():
+        errors.append(
+            f"Bauauftrags-Guard nicht gefunden: {BUILD_ORDER_GUARD}. Ohne ihn ist "
+            "nicht pruefbar, ob der Bauauftrag mehr als eine leere Huelle ist."
+        )
+        return errors
+
+    guard_result = subprocess.run(
+        [sys.executable, str(BUILD_ORDER_GUARD), str(build_order_path)],
+        capture_output=True,
+        text=True,
+    )
+    if guard_result.returncode != 0:
+        errors.append(
+            f"Bauauftrag '{relative}' besteht validate-build-order.py nicht: "
+            + " | ".join(
+                line.strip()
+                for line in (guard_result.stdout + guard_result.stderr).splitlines()
+                if line.strip()
+            )
+        )
 
     return errors
 
@@ -319,7 +391,46 @@ def _existing_rounds(finding_id):
     return rounds
 
 
-def _check_review_artifact(fields, finding_path):
+def _historical_commit_matching(reviewed_hash, finding_id, review_relative_path):
+    """The commit this finding was actually closed at, or None.
+
+    Searched only among commits that touched THIS finding or ITS review
+    artifact -- the closure commit necessarily does. A stale PASS that never
+    corresponded to any state in which this finding was being closed matches
+    nothing here and is still rejected.
+    """
+    pathspecs = [f"factory/findings/{finding_id}.md", review_relative_path]
+    try:
+        log = subprocess.run(
+            [
+                "git",
+                "log",
+                "--format=%H",
+                "-n",
+                str(MAX_CLOSURE_HISTORY_COMMITS),
+                "--",
+                *pathspecs,
+            ],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if log.returncode != 0:
+        return None
+
+    for commit in log.stdout.split():
+        try:
+            historical_hash, _ = compute_scope_hash_at(REPO_ROOT, commit)
+        except ScopeHashError:
+            continue
+        if historical_hash == reviewed_hash:
+            return commit
+    return None
+
+
+def _check_review_artifact(fields, finding_path, status):
     """Closure-gate cross-check: is this the finding's own latest passing
     review, of exactly this code state? See the module docstring for the
     eight conditions and the audit findings each one closes."""
@@ -442,13 +553,40 @@ def _check_review_artifact(fields, finding_path):
 
     reviewed_hash = _read_review_field(review_path, REVIEW_SCOPE_HASH_LINE_RE)
     if reviewed_hash != current_hash:
-        errors.append(
-            f"Scope-Hash-Abweichung: Review-Artefakt '{value}' wurde gegen "
-            f"{reviewed_hash} erstellt, der aktuelle Stand ist {current_hash}. "
-            "Der geprüfte Codezustand ist nicht mehr der aktuelle -- ein neuer "
-            "Review-Durchgang ist noetig."
-        )
-        return errors
+        # A finding that is still being closed (READY_FOR_CLOSURE) must match
+        # the CURRENT state -- that is the live gate before merge, unchanged.
+        #
+        # A finding that is already CLOSED is history. It was reviewed against
+        # the repository as it stood then, and later, unrelated work
+        # necessarily moves the hash. Re-judging it against today's tree made
+        # every closed finding fail on the next change, which meant the first
+        # merged finding turned the whole factory read-only. The binding is
+        # kept, not dropped: the reviewed hash must still match one exact tree,
+        # recomputed from git's object store, and only among commits that
+        # actually touched this finding or its review artifact.
+        historical_commit = None
+        if status == "CLOSED":
+            historical_commit = _historical_commit_matching(
+                reviewed_hash, finding_id, value
+            )
+        if historical_commit is None:
+            hint = (
+                "Der geprüfte Codezustand ist nicht mehr der aktuelle -- ein neuer "
+                "Review-Durchgang ist noetig."
+            )
+            if status == "CLOSED":
+                hint = (
+                    "Auch kein Commit, der dieses Finding oder sein Review-Artefakt "
+                    "veraendert hat, traegt diesen Scope-Hash -- dieses PASS hat also "
+                    "nie einen Zustand abgedeckt, in dem dieses Finding geschlossen "
+                    "wurde."
+                )
+            errors.append(
+                f"Scope-Hash-Abweichung: Review-Artefakt '{value}' wurde gegen "
+                f"{reviewed_hash} erstellt, der aktuelle Stand ist {current_hash}. "
+                + hint
+            )
+            return errors
 
     # 8. no non-PASS round for the identical code state
     for number in sorted(rounds):

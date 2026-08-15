@@ -9,6 +9,41 @@ tatsächlichen Code.
 
 Diese README-Datei ist selbst kein Bauauftrag.
 
+## Das ist erzwungen, nicht empfohlen (Audit-Befund F-10)
+
+Bis zur Operational-Robustness-Reparatur stand diese Gliederung nur hier, als Prosa. Ein Finding
+konnte `IMPLEMENTING`, `VERIFYING`, `READY_FOR_CLOSURE` und `CLOSED` ohne **jeden** Bauauftrag
+erreichen, und alle Prüfschichten meldeten Erfolg. Der Reviewer bekam damit die Anweisung, etwas
+gegen den Code zu halten, das gar nicht existierte.
+
+Jetzt prüft [`factory/guards/validate-build-order.py`](../guards/validate-build-order.py)
+deterministisch, und der kanonische Runner führt ihn in jedem CI-Lauf aus:
+
+1. **Kanonischer Ort.** Der aufgelöste reale Pfad liegt in `factory/build-orders/`, der Dateiname
+   ist `<Finding-ID>.md`. Ein Symlink kann nicht hinausführen. `README.md` ist Dokumentation und
+   wird nie als Bauauftrag geprüft.
+2. **Gegenseitige Bindung.** `factory/findings/<Finding-ID>.md` muss existieren, und die
+   Titelzeile muss `# Bauauftrag: <Finding-ID>` für genau dieses Finding lauten. Ein verwaister
+   Bauauftrag und einer, der auf ein anderes Finding titelt, werden abgelehnt.
+3. **Pflichtabschnitte.** Alle sechs unten. Zusätzliche Abschnitte sind erlaubt.
+4. **Keine Platzhalter.** Jeder Pflichtabschnitt muss echten Inhalt tragen — nicht leer, kein
+   `TBD`/`TODO`/`N/A`, nicht nur ein paar Zeichen.
+5. **Evidence folgt dem Lebenszyklus**, gelesen aus dem `Status:` des Findings:
+   - ab `IMPLEMENTING`: **Red Regression Evidence** muss einen tatsächlich zitierten Lauf
+     enthalten (einen nicht-leeren ```-Block). „Der Test war rot" ohne den Lauf ist eine
+     Behauptung, keine Evidence.
+   - ab `VERIFYING`: **Green Runtime Fix Evidence** ebenso.
+
+   Bei `IMPLEMENTING` darf der grüne Abschnitt noch ankündigen, was laufen wird — ihn dort schon
+   zu verlangen hieße, den Beleg vor der Tatsache zu schreiben.
+
+`OPEN`, `ANALYZED` und `EXPERT_REVIEW_REQUIRED` verlangen keinen Bauauftrag: er entsteht nach
+`ANALYZED`, und die Eskalation muss auch aus einem Zustand heraus erreichbar bleiben, in dem noch
+keiner existieren kann.
+
+Die Abschnittsüberschriften werden umlaut- und schreibungstolerant erkannt, `## Primäre
+Sicherheitsgrenze` und `## Primaere Sicherheitsgrenze` gelten also beide.
+
 ## Bewährte Gliederung
 
 ```

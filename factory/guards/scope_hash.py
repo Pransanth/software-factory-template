@@ -142,13 +142,142 @@ def compute_scope_hash(repo_root=None):
     return "sha256:" + digest.hexdigest(), count
 
 
+def _tree_entries(repo_root, commit):
+    """[(mode, oid, path)] for every blob/gitlink in <commit>'s tree."""
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "-z", commit],
+        cwd=str(repo_root),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise ScopeHashError(f"'git ls-tree {commit}' fehlgeschlagen: {detail}")
+
+    entries = []
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            meta, path = raw.split(b"\t", 1)
+            mode, _type, oid = meta.split(b" ", 2)
+        except ValueError as exc:
+            raise ScopeHashError(f"ls-tree-Zeile nicht lesbar: {raw!r}") from exc
+        entries.append(
+            (
+                mode.decode("ascii"),
+                oid.decode("ascii"),
+                path.decode("utf-8", "surrogateescape"),
+            )
+        )
+    return entries
+
+
+def _blob_bytes(repo_root, oids):
+    """{oid: bytes} for the given blob oids, via one `git cat-file --batch`."""
+    if not oids:
+        return {}
+    result = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=str(repo_root),
+        input=("\n".join(oids) + "\n").encode("ascii"),
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise ScopeHashError(f"'git cat-file --batch' fehlgeschlagen: {detail}")
+
+    contents = {}
+    data = result.stdout
+    offset = 0
+    for oid in oids:
+        newline = data.find(b"\n", offset)
+        if newline == -1:
+            raise ScopeHashError(f"cat-file-Antwort fuer {oid} unvollstaendig.")
+        header = data[offset:newline].decode("ascii", "replace").split()
+        if len(header) != 3:
+            raise ScopeHashError(f"cat-file-Header nicht lesbar: {header!r}")
+        size = int(header[2])
+        start = newline + 1
+        contents[oid] = data[start : start + size]
+        offset = start + size + 1  # trailing newline after the object body
+    return contents
+
+
+def compute_scope_hash_at(repo_root, commit):
+    """The scope hash of a COMMIT's tree, byte-identical to compute_scope_hash().
+
+    Why this exists: compute_scope_hash() reads the working tree, so it can
+    only ever answer "is this the state the reviewer saw *right now*". That is
+    exactly right while a finding is being closed -- and wrong forever after.
+    A finding that legitimately closed months ago was reviewed against the
+    state of the repository *at that time*; later, unrelated work necessarily
+    moves the hash. Without this function the closure gate re-judged history on
+    every run, so the first merged finding made every subsequent change fail
+    the canonical runner and CI. The factory would have been usable exactly
+    once.
+
+    This does NOT relax the F-03 binding: the review still has to match one
+    exact tree, hashed the same way, and that tree comes from git's object
+    store rather than from a claim in a file. It only changes *which* tree the
+    comparison is allowed to be against -- see validate-finding.py, which
+    accepts a historical match solely for CLOSED and solely for commits that
+    actually touched this finding or its review artifact.
+
+    Reproduces compute_scope_hash() exactly:
+      - regular blob   -> sha256 of the blob bytes
+      - symlink (120000) -> "symlink:" + sha256 of the target path
+      - gitlink (160000) -> "absent" (a submodule is not a readable plain file)
+    """
+    root = Path(repo_root or DEFAULT_REPO_ROOT).resolve()
+
+    entries = [entry for entry in _tree_entries(root, commit) if in_scope(entry[2])]
+    blob_oids = sorted({oid for mode, oid, _ in entries if mode != "160000"})
+    contents = _blob_bytes(root, blob_oids)
+
+    digest = hashlib.sha256()
+    digest.update(SCOPE_HASH_VERSION.encode("ascii") + b"\n")
+
+    count = 0
+    for mode, oid, relative_path in sorted(entries, key=lambda entry: entry[2]):
+        if mode == "160000":
+            fingerprint = "absent"
+        elif mode == "120000":
+            fingerprint = "symlink:" + hashlib.sha256(contents[oid]).hexdigest()
+        else:
+            fingerprint = hashlib.sha256(contents[oid]).hexdigest()
+        digest.update(relative_path.encode("utf-8", "surrogateescape"))
+        digest.update(b"\0")
+        digest.update(fingerprint.encode("ascii"))
+        digest.update(b"\n")
+        count += 1
+
+    if count == 0:
+        raise ScopeHashError(
+            f"Commit {commit} enthaelt keine einzige Datei im Scope -- "
+            "so ein Hash waere bedeutungslos."
+        )
+
+    return "sha256:" + digest.hexdigest(), count
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description="Compute the factory scope hash.")
     parser.add_argument("--repo-root", type=Path, default=None)
+    parser.add_argument(
+        "--commit",
+        default=None,
+        help=(
+            "Scope-Hash des Baums dieses Commits statt des Arbeitsbaums. "
+            "Fuer die Pruefung historischer Closures (siehe compute_scope_hash_at)."
+        ),
+    )
     args = parser.parse_args(argv[1:])
 
     try:
-        scope_hash, count = compute_scope_hash(args.repo_root)
+        if args.commit:
+            scope_hash, count = compute_scope_hash_at(args.repo_root, args.commit)
+        else:
+            scope_hash, count = compute_scope_hash(args.repo_root)
     except ScopeHashError as exc:
         print(f"SCOPE_HASH_ERROR: {exc}", file=sys.stderr)
         return 1

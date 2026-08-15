@@ -47,8 +47,24 @@
 #   factory/scripts/gh-query.sh required-checks <BRANCH>
 #   factory/scripts/gh-query.sh merge <PR_NUMBER> <MERGE_METHOD> <EXPECTED_HEAD_SHA>
 #
+# Added by the operational-robustness package:
+#   factory/scripts/gh-query.sh pr-for-branch <BRANCH>          (F-16, resume)
+#   factory/scripts/gh-query.sh pr-permission-probe <BRANCH>    (F-12)
+#   factory/scripts/gh-query.sh ruleset-guarantees <BRANCH> [CHECK_NAME]  (F-13)
+#   factory/scripts/gh-query.sh classic-protection <BRANCH> [CHECK_NAME]  (F-13)
+#
 # Exit codes for `required-check`: 0 success, 1 failed, 2 pending,
 # 3 absent, 4 api_error. Only 0 may lead to a merge.
+#
+# Exit codes for `pr-for-branch`: 0 a pull request exists, 3 none exists,
+# 4 api_error. "No pull request yet" is a normal answer with its own code and
+# must never be confused with a failed query -- that distinction is the whole
+# point of resuming safely after a crashed session.
+#
+# Exit codes for `pr-permission-probe`: 0 permitted, 1 blocked (including an
+# unexpectedly created pull request), 4 api_error. Anything that is not
+# GitHub's own validation error is blocked, on purpose: the previous version
+# classified by exclusion and reported a 401 or a 404 as "permitted".
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +77,7 @@ API_BODY=""
 API_RC=0
 
 usage() {
-  echo "usage: gh-query.sh {repo|default-branch|pr|pr-summary|pr-create|check-runs|check-runs-summary|required-check|actions-run|actions-run-summary|actions-jobs|actions-jobs-summary|branch-rules|required-checks|merge} [arg...]" >&2
+  echo "usage: gh-query.sh {repo|default-branch|pr|pr-summary|pr-create|pr-for-branch|pr-permission-probe|check-runs|check-runs-summary|required-check|actions-run|actions-run-summary|actions-jobs|actions-jobs-summary|branch-rules|required-checks|ruleset-guarantees|classic-protection|merge} [arg...]" >&2
   exit 2
 }
 
@@ -84,6 +100,29 @@ render() {
     return 4
   fi
   return "$rendered_rc"
+}
+
+# Like render(), but WITHOUT the "gh-api.sh failed, so this is an api_error"
+# override. Used only by the modes that are given gh-api.sh's exit code
+# explicitly and interpret it themselves -- the PR permission probe, where an
+# HTTP error is the expected and informative answer, and classic branch
+# protection, where a 404 means "no classic protection", a legitimate state.
+render_raw() {
+  printf '%s' "$API_BODY" | python3 "$GH_EVIDENCE" "$@"
+}
+
+# OWNER of the repository origin points at, for endpoints that need
+# `head=OWNER:BRANCH`. Derived through gh-api.sh's own normalisation and
+# validation (F-17) rather than by re-parsing the remote URL here.
+repo_owner() {
+  local slug_line slug
+  slug_line="$("$GH_API" slug 2>/dev/null | /usr/bin/grep '^slug:' || true)"
+  slug="${slug_line#slug: }"
+  if [ -z "$slug" ] || [ "$slug" = "$slug_line" ]; then
+    echo "api_error: OWNER liess sich nicht aus origin ableiten." >&2
+    return 4
+  fi
+  printf '%s' "${slug%%/*}"
 }
 
 require_arg() {
@@ -172,6 +211,44 @@ case "$SUBCOMMAND" in
     require_arg "$ARG" "usage: gh-query.sh required-checks <BRANCH>"
     api_call GET "/rules/branches/$ARG"
     render required-checks
+    exit $?
+    ;;
+
+  # --- resume / onboarding helpers (audit findings F-12, F-13, F-16) --------
+
+  pr-for-branch)
+    require_arg "$ARG" "usage: gh-query.sh pr-for-branch <BRANCH>"
+    OWNER="$(repo_owner)" || exit 4
+    api_call GET "/pulls?head=${OWNER}:${ARG}&state=all&per_page=100"
+    render pr-for-branch "$ARG"
+    exit $?
+    ;;
+  ruleset-guarantees)
+    require_arg "$ARG" "usage: gh-query.sh ruleset-guarantees <BRANCH> [CHECK_NAME]"
+    CHECK_NAME="${3:-$DEFAULT_REQUIRED_CHECK}"
+    api_call GET "/rules/branches/$ARG"
+    render ruleset-guarantees "$CHECK_NAME"
+    exit $?
+    ;;
+  classic-protection)
+    require_arg "$ARG" "usage: gh-query.sh classic-protection <BRANCH> [CHECK_NAME]"
+    CHECK_NAME="${3:-$DEFAULT_REQUIRED_CHECK}"
+    api_call GET "/branches/$ARG/protection"
+    render_raw classic-protection "$API_RC" "$CHECK_NAME"
+    exit $?
+    ;;
+  pr-permission-probe)
+    # Probes POST /pulls with head == base. Such a request can never create a
+    # pull request, and GitHub checks the token's permission before it
+    # validates the payload -- so a validation error proves the permission is
+    # there. Nothing is created; see gh_evidence.pr_permission_probe for why
+    # only that one answer counts as "permitted".
+    require_arg "$ARG" "usage: gh-query.sh pr-permission-probe <BRANCH>"
+    PROBE_PAYLOAD="$(python3 "$GH_EVIDENCE" --json-object \
+      title "factory-preflight permission probe (cannot create a PR: head == base)" \
+      head "$ARG" base "$ARG")"
+    api_call POST /pulls "$PROBE_PAYLOAD"
+    render_raw pr-permission-probe "$API_RC"
     exit $?
     ;;
 

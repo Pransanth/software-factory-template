@@ -15,3 +15,10 @@
 # (cpython-311 vs. cpython-39), also je nach Maschine unterschiedlich.
 __pycache__/
 *.py[cod]
+
+# Maschinenlokaler Resume-Zustand pro Finding
+# (factory/guards/finding_state.py). Bewusst ungetrackt: er ist ein Index in
+# git, GitHub und factory/reviews/, keine Evidence. Getrackt laege er im
+# Scope-Hash, und jede Zustandsaktualisierung wuerde das Review entwerten,
+# bei dessen Fortsetzung er helfen soll.
+.factory/

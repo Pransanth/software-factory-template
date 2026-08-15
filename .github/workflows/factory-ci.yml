@@ -33,6 +33,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history, not the default shallow single commit. The closure
+          # gate verifies an already-CLOSED finding against the tree of the
+          # commit it was actually closed at (scope_hash.compute_scope_hash_at).
+          # With fetch-depth 1 that history does not exist in the runner, so
+          # every previously merged finding would fail here while passing
+          # locally -- a false red that is impossible to diagnose from the log.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -48,11 +56,13 @@ jobs:
       - name: Run project test suite
         run: python3 factory/guards/run-project-tests.py
 
-      - name: Run factory guard tests
-        run: python3 -m unittest factory.guards.test_validate_finding factory.guards.test_validate_review factory.guards.test_run_factory_checks factory.guards.test_create_finding_worktree factory.guards.test_factory_preflight factory.guards.test_trust_core factory.guards.test_control_plane factory.guards.test_gh_evidence -v
-
-      - name: Run Stop hook tests
-        run: python3 .claude/hooks/test_stop_validate_findings.py -v
-
-      - name: Run SubagentStop review hook tests
-        run: python3 .claude/hooks/test_subagentstop_write_review.py -v
+      # Every factory/guards/test_*.py and .claude/hooks/test_*.py is
+      # discovered and run -- no hand-maintained module list (audit finding
+      # F-19). The list this replaced had to be edited by hand for every new
+      # test file, in a control-plane file, which meant forgetting was both
+      # easy and silent: CI stayed green precisely because the new test never
+      # ran. Discovering nothing is a hard failure here, and the runner
+      # reports real sandbox verification separately from ordinary CI tests,
+      # so a skipped sandbox test is never counted as one that passed.
+      - name: Run factory guard and hook tests (auto-discovered)
+        run: python3 factory/guards/run-factory-tests.py

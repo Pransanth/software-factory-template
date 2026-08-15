@@ -19,7 +19,11 @@
       "Edit(/.github/workflows/**)",
       "Write(/.github/workflows/**)",
       "Edit(/.claude/settings.json)",
-      "Write(/.claude/settings.json)"
+      "Write(/.claude/settings.json)",
+      "Edit(/CLAUDE.md)",
+      "Write(/CLAUDE.md)",
+      "Edit(/factory/control-plane.sha256)",
+      "Write(/factory/control-plane.sha256)"
     ]
   },
   "sandbox": {
@@ -36,7 +40,9 @@
         "./.claude/rules",
         "./.github/workflows",
         "./.claude/settings.json",
-        "./.claude/settings.local.json"
+        "./.claude/settings.local.json",
+        "./CLAUDE.md",
+        "./factory/control-plane.sha256"
       ]
     }
   },

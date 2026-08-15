@@ -9,7 +9,14 @@
 # Scope: always targets the repo this working copy's `origin` remote points
 # at -- callers cannot redirect it to another repository.
 #
-# Two audit findings shaped this script's current behavior:
+# Three audit findings shaped this script's current behavior:
+#
+#   F-20: the credential lookup was interactive. `git credential fill` falls
+#   back to an askpass program and then to /dev/tty, which is not stdin, so a
+#   missing or locked credential did not fail -- it HUNG an unattended run
+#   indefinitely. The lookup is now explicitly non-interactive and a missing
+#   credential is an immediate, explained blocker with a non-zero exit. No
+#   token is printed, then or ever.
 #
 #   F-17: the origin URL was reduced to OWNER/REPO by stripping two exact
 #   prefixes and nothing else. Perfectly ordinary remotes --
@@ -129,10 +136,43 @@ REPO_PATH="$(credential_path "$REMOTE_URL")"
 # credential.https://github.com.useHttpPath=true means the repo-specific
 # keychain entry is keyed by path too -- a fill request without `path` won't
 # match it, so `path` is derived from origin's URL and included here.
-TOKEN="$(printf 'protocol=https\nhost=github.com\npath=%s\n\n' "$REPO_PATH" | git credential fill | awk -F= '/^password=/{print $2}')"
+#
+# F-20: `git credential fill` is interactive by default. With no helper
+# configured, a locked keychain, or a revoked entry, git falls back to an
+# askpass program and then to reading from /dev/tty -- and /dev/tty is NOT
+# stdin, so piping the request in does not stop it. In an unattended factory
+# run that is the worst possible failure mode: the process does not fail, it
+# HANGS, holding the session open with no output and no exit code, until
+# something external kills it. A blocked run must be a blocked run, visibly
+# and immediately.
+#
+# The three settings below are what make it non-interactive, and each one
+# closes a different door:
+#   GIT_TERMINAL_PROMPT=0     no fallback prompt on /dev/tty
+#   GIT_ASKPASS=              set-but-empty, which makes git skip the whole
+#                             askpass chain (GIT_ASKPASS -> core.askpass ->
+#                             SSH_ASKPASS) rather than fall through to it
+#   credential.interactive=false  honoured by helpers that prompt on their own
+#                                 (Git Credential Manager); ignored by helpers
+#                                 that do not, so it is safe everywhere
+#
+# Nothing about the credential itself is changed, read differently, or stored:
+# this only removes the ability to ask a human who is not there.
+set +e
+CREDENTIAL_FILL="$(printf 'protocol=https\nhost=github.com\npath=%s\n\n' "$REPO_PATH" \
+  | GIT_TERMINAL_PROMPT=0 GIT_ASKPASS= SSH_ASKPASS= \
+    git -c credential.interactive=false credential fill 2>/dev/null)"
+set -e
+
+TOKEN="$(printf '%s\n' "$CREDENTIAL_FILL" | /usr/bin/awk -F= '/^password=/{print $2}')"
 
 if [ -z "$TOKEN" ]; then
-  echo "ERROR: no GitHub credential available via git credential-helper for host github.com" >&2
+  echo "ERROR: kein GitHub-Credential ueber den git-credential-Helper verfuegbar" >&2
+  echo "       (host=github.com, path=${REPO_PATH})." >&2
+  echo "       Die Abfrage lief bewusst nicht-interaktiv: ein fehlendes oder" >&2
+  echo "       gesperrtes Credential ist ein klarer Blocker, kein Prompt und kein" >&2
+  echo "       haengender Lauf. Einmalig ein repo-spezifisches Token im" >&2
+  echo "       git-credential-Helper hinterlegen -- siehe factory/ONBOARDING.md." >&2
   exit "$EXIT_CONFIG"
 fi
 

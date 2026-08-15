@@ -34,11 +34,14 @@ REAL_SETTINGS_JSON = REPO_ROOT / ".claude" / "settings.json"
 # Mirrors the REQUIRED_FILES list inside the preflight script.
 REQUIRED_FILES = [
     "factory/guards/run-factory-checks.py",
+    "factory/guards/run-factory-tests.py",
     "factory/guards/validate-finding.py",
     "factory/guards/validate-review.py",
+    "factory/guards/validate-build-order.py",
     "factory/guards/validate-control-plane.py",
     "factory/guards/scope_hash.py",
     "factory/guards/gh_evidence.py",
+    "factory/guards/finding_state.py",
     "factory/guards/run-project-tests.py",
     "factory/control-plane.sha256",
     "factory/scripts/gh-api.sh",
@@ -53,14 +56,25 @@ REQUIRED_FILES = [
     ".github/workflows/factory-ci.yml",
 ]
 
-# These must be the real, working scripts in the fixture: the preflight now
-# actually RUNS the control-plane guard rather than only checking that a file
-# with that name exists (audit finding F-14 is not in this package, but the
-# control-plane check added for F-05 has to execute to mean anything).
-REAL_FILES_TO_COPY = [
-    "factory/guards/validate-control-plane.py",
-    "factory/guards/scope_hash.py",
-]
+# The fixture ships the REAL files, not stubs. Audit finding F-14: the
+# preflight no longer asks whether a file with the right name exists, it runs
+# the control-plane guard, the canonical runner and the discovered test suite.
+# A fixture full of "placeholder" would now -- correctly -- fail, so building
+# one would mean testing the preflight against a repository it is supposed to
+# reject.
+FILES_COPIED_VERBATIM = [rel for rel in REQUIRED_FILES if rel != "factory/control-plane.sha256"]
+
+# One tiny, genuinely passing test so the discovery runner has something to
+# find. Discovering nothing is a hard failure (F-19), which is the correct
+# behaviour and not what these preflight tests are about.
+SMOKE_TEST = """\
+import unittest
+
+
+class Smoke(unittest.TestCase):
+    def test_the_fixture_factory_runs(self):
+        self.assertTrue(True)
+"""
 
 GIT_ENV_OVERRIDES = {
     "GIT_AUTHOR_NAME": "Factory Test",
@@ -101,15 +115,28 @@ class FactoryPreflightTests(unittest.TestCase):
         if origin_url is not None:
             _git(self.root, "remote", "add", "origin", origin_url)
 
-    def make_required_files(self):
+    def make_required_files(self, stamp=True):
+        """Build a fixture that is a real, working factory -- not a name-shaped
+        shell. See FILES_COPIED_VERBATIM for why."""
+        for rel in FILES_COPIED_VERBATIM:
+            path = self.root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / rel, path)
+        for extra in ("factory/findings", "factory/reviews", "factory/build-orders"):
+            (self.root / extra).mkdir(parents=True, exist_ok=True)
+        (self.root / "factory" / "guards" / "test_smoke.py").write_text(
+            SMOKE_TEST, encoding="utf-8"
+        )
+        if stamp:
+            self.stamp_control_plane()
+
+    def make_placeholder_files(self):
+        """The repository audit finding F-14 describes: every required file
+        exists, and every one of them is a stub."""
         for rel in REQUIRED_FILES:
             path = self.root / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists():
-                path.write_text("placeholder\n", encoding="utf-8")
-        shutil.copy2(REAL_SETTINGS_JSON, self.root / ".claude" / "settings.json")
-        for rel in REAL_FILES_TO_COPY:
-            shutil.copy2(REPO_ROOT / rel, self.root / rel)
+            path.write_text("placeholder\n", encoding="utf-8")
 
     def stamp_control_plane(self):
         """Track the fixture's files and stamp the control-plane manifest.
@@ -230,8 +257,22 @@ class FactoryPreflightTests(unittest.TestCase):
         self.write_local_settings(["Bash(curl *)"])
         result = self.run_preflight("--local-only")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Zu breite lokale Freigaben", result.stdout)
+        self.assertIn("Unbekannte Shell-Freigaben", result.stdout)
         self.assertIn("Bash(curl *)", result.stdout)
+
+    def test_an_unlisted_shell_grant_is_rejected_even_if_it_looks_harmless(self):
+        """Audit finding F-14/E: the check used to be a blacklist, so a grant
+        it had never heard of passed silently. Whether `Bash(rm -rf /tmp/x)`
+        looks harmless is not the point -- an unattended agent's shell
+        permissions are not decided by what a fixed list happens to mention."""
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list() + ["Bash(rsync *)"])
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Unbekannte Shell-Freigaben", result.stdout)
+        self.assertIn("Bash(rsync *)", result.stdout)
 
     def test_missing_gitignore_entry_is_reported(self):
         self.make_git_repo()
@@ -254,7 +295,15 @@ class FactoryPreflightTests(unittest.TestCase):
 
     # -- the fully prepared repository ------------------------------------
 
-    def test_fully_prepared_repository_passes_local_preflight(self):
+    def test_fully_prepared_repository_reports_partial_in_local_only_mode(self):
+        """Audit finding F-11, inverted from what this test used to assert.
+
+        It used to demand `FACTORY_PREFLIGHT: PASS` and "laeuft ohne
+        Routine-Approvals" from a run that had skipped every GitHub gate --
+        a verdict about a layer the run never entered. A fully prepared local
+        repository is now PARTIAL with its own exit code, and PASS is
+        unreachable without the remote checks.
+        """
         self.make_git_repo()
         self.make_required_files()
         self.make_gitignore()
@@ -262,10 +311,79 @@ class FactoryPreflightTests(unittest.TestCase):
         self.stamp_control_plane()
 
         result = self.run_preflight("--local-only")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("FACTORY_PREFLIGHT: PASS", result.stdout)
-        self.assertIn("ohne Routine-Approvals", result.stdout)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("FACTORY_PREFLIGHT: PARTIAL", result.stdout)
+        self.assertNotIn("FACTORY_PREFLIGHT: PASS", result.stdout)
         self.assertNotIn("[FEHLT]", result.stdout)
+        # And it says plainly what was NOT checked.
+        self.assertIn("NICHT geprueft", result.stdout)
+        self.assertIn("Branch-Schutz", result.stdout)
+
+    def test_local_only_can_never_reach_pass(self):
+        """Static guarantee, independent of any fixture: the only PASS in the
+        script is unreachable while MODE is local."""
+        source = REAL_SCRIPT.read_text(encoding="utf-8")
+        pass_index = source.index('echo "FACTORY_PREFLIGHT: PASS"')
+        partial_index = source.index('echo "FACTORY_PREFLIGHT: PARTIAL"')
+        self.assertLess(
+            partial_index,
+            pass_index,
+            "the PARTIAL branch must return before PASS can be printed",
+        )
+        self.assertEqual(source.count('echo "FACTORY_PREFLIGHT: PASS"'), 1)
+
+    def test_a_repository_of_placeholders_never_passes(self):
+        """Audit finding F-14: every required file existed, every one was a
+        stub, and the preflight reported the factory as fully equipped."""
+        self.make_git_repo()
+        self.make_placeholder_files()
+        self.make_gitignore()
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("Platzhalter", result.stdout)
+        self.assertNotIn("FACTORY_PREFLIGHT: PASS", result.stdout)
+        self.assertNotIn("FACTORY_PREFLIGHT: PARTIAL", result.stdout)
+
+    def test_the_factory_is_actually_executed_not_only_inventoried(self):
+        """A guard that cannot run is not a guard. The preflight runs the
+        canonical runner and the discovered test suite."""
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list())
+        self.stamp_control_plane()
+        result = self.run_preflight("--local-only")
+        self.assertIn("Kanonischer Runner laeuft und besteht", result.stdout)
+        self.assertIn("Factory-Testsuite laeuft und besteht", result.stdout)
+
+    def test_a_broken_factory_test_blocks_the_preflight(self):
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list())
+        (self.root / "factory" / "guards" / "test_smoke.py").write_text(
+            "import unittest\n\n\n"
+            "class Broken(unittest.TestCase):\n"
+            "    def test_broken(self):\n"
+            "        self.assertTrue(False)\n",
+            encoding="utf-8",
+        )
+        self.stamp_control_plane()
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("Factory-Testsuite schlaegt fehl", result.stdout)
+
+    def test_sandbox_verification_is_reported_as_not_performed_outside_a_sandbox(self):
+        """F-19: a skipped sandbox test must never be sold as evidence that
+        the sandbox protects anything."""
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list())
+        self.stamp_control_plane()
+        result = self.run_preflight("--local-only")
+        self.assertIn("Sandbox-Verifikation NICHT durchgefuehrt", result.stdout)
+        self.assertIn("belegt den Sandbox-Schutz damit ausdruecklich NICHT", result.stdout)
 
     def test_local_only_mode_skips_network_checks(self):
         self.make_git_repo()
@@ -300,7 +418,8 @@ class FactoryPreflightTests(unittest.TestCase):
         self.make_required_files()
         self.make_gitignore()
         self.write_local_settings(self.suggested_allow_list())
-        # No manifest stamped at all.
+        # No manifest at all.
+        (self.root / "factory" / "control-plane.sha256").unlink(missing_ok=True)
         result = self.run_preflight("--local-only")
         self.assertEqual(result.returncode, 1)
         self.assertIn("Control-Plane", result.stdout)
@@ -316,7 +435,7 @@ class FactoryPreflightTests(unittest.TestCase):
         )
         result = self.run_preflight("--local-only")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Zu breite lokale Freigaben", result.stdout)
+        self.assertIn("Schreibrechte auf die Kontrollebene", result.stdout)
         self.assertIn("Edit(/factory/guards/**)", result.stdout)
 
     def test_suggested_allow_list_does_not_grant_control_plane_writes(self):
@@ -351,33 +470,50 @@ class FactoryPreflightTests(unittest.TestCase):
     def test_pr_permission_probe_can_never_create_a_pull_request(self):
         """Contents:write and Pull requests:write are different token
         permissions -- a push can succeed while POST /pulls is refused. The
-        preflight therefore probes the real endpoint, but with head == base,
-        which GitHub can never turn into a pull request."""
+        factory therefore probes the real endpoint, but with head == base,
+        which GitHub can never turn into a pull request.
+
+        The probe moved out of this script and into gh-query.sh/gh_evidence.py
+        (audit finding F-12) so that its classification is regression-tested
+        without a network. What stays pinned here is the invariant that it
+        cannot create anything, and that a refusal is reported as a concrete
+        missing prerequisite rather than a generic error."""
+        query_source = (REPO_ROOT / "factory" / "scripts" / "gh-query.sh").read_text(
+            encoding="utf-8"
+        )
+        probe_block = query_source[query_source.index("pr-permission-probe)") :]
+        probe_block = probe_block[: probe_block.index(";;")]
+        self.assertIn('head "$ARG" base "$ARG"', probe_block)
+
         source = REAL_SCRIPT.read_text(encoding="utf-8")
-        probe_lines = [
+        self.assertIn("pr-permission-probe", source)
+        self.assertIn("Pull requests: read/write", source)
+        # The preflight must not post to /pulls itself any more. Comments may
+        # still explain why the probe exists; executable lines may not do it.
+        posting_lines = [
             line
             for line in source.splitlines()
             if "POST /pulls" in line and not line.lstrip().startswith("#")
         ]
-        self.assertEqual(len(probe_lines), 1, probe_lines)
-        probe = probe_lines[0]
-        self.assertIn('\\"head\\":\\"$DEFAULT_BRANCH\\"', probe)
-        self.assertIn('\\"base\\":\\"$DEFAULT_BRANCH\\"', probe)
-        # And the refusal is classified as a missing prerequisite, not as a
-        # generic error the operator has to interpret.
-        self.assertIn("Pull requests: read/write", source)
+        self.assertEqual(posting_lines, [])
 
     def test_script_never_prints_the_credential(self):
         """The credential check must prove presence without ever emitting the
         value: the only use of the credential-helper output is a grep -q."""
         source = REAL_SCRIPT.read_text(encoding="utf-8")
         credential_lines = [
-            line for line in source.splitlines() if "git credential fill" in line
+            line
+            for line in source.splitlines()
+            if "credential fill" in line and not line.lstrip().startswith("#")
         ]
         self.assertTrue(credential_lines)
         for line in credential_lines:
             self.assertIn("grep -q", line)
             self.assertNotIn("echo", line)
+            # F-20: the same invocation must be non-interactive, or a missing
+            # credential hangs the onboarding run instead of reporting it.
+            self.assertIn("GIT_TERMINAL_PROMPT=0", line)
+            self.assertIn("GIT_ASKPASS=", line)
 
 
 if __name__ == "__main__":
