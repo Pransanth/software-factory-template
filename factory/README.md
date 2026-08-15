@@ -11,6 +11,10 @@ Ein Finding ist eine einzelne Markdown-Datei unter `factory/findings/`. Sie besc
 Befund (aktuell nur Sicherheitsbefunde) und trägt einen Status (`OPEN`, `ANALYZED`, ... siehe
 Workflow-Regeln). Je nach Status müssen bestimmte Analysefelder ausgefüllt sein.
 
+Den Aufbau zeigt [`factory/findings/EXAMPLE-FINDING.md`](findings/EXAMPLE-FINDING.md) — eine
+ausdrücklich als Formatbeispiel gekennzeichnete Datei ohne Produktbezug. In einem echten Projekt
+wird sie durch die tatsächlichen Findings ersetzt oder gelöscht.
+
 ## Was ist ein Validator?
 
 Ein Validator ist ein kleines, deterministisches Skript, das eine einzelne Datei gegen die Regeln
