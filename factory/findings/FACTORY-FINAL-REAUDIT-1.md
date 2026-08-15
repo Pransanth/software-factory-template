@@ -1,6 +1,6 @@
 # FACTORY-FINAL-REAUDIT-1
 
-Status: VERIFYING
+Status: CLOSED
 Severity: P2
 
 ## Befund
@@ -197,8 +197,69 @@ Verification Evidence: Alle Gates am 2026-08-15 im echten Repository auf Branch
   implementierenden Agenten nicht selbst geschrieben werden; der getestete Stand wurde im
   Scratchpad vorbereitet und ueber genau einen externen, menschlich ausgefuehrten Apply-Schritt
   eingespielt.
-CI Evidence: Wird nach dem Push mit dem konkreten Actions-Lauf und dem Urteil von
-  gh-query.sh required-check nachgetragen.
+CI Evidence: Echte externe GitHub-CI, gruen fuer exakt den Head-SHA
+  7fe83dfe4bf9baac2f51663d5cd4bf3205e765c3 auf PR #7
+  (https://github.com/Pransanth/software-factory-template/pull/7). Das Urteil ist nicht aus Prosa
+  gelesen, sondern vom festen Helfer: factory/scripts/gh-query.sh required-check
+  7fe83dfe4bf9baac2f51663d5cd4bf3205e765c3 -- verdict: success, check_name: factory-checks,
+  matching_runs: 2, Exit 0. Nur Exit 0 darf zu einem Merge fuehren; 'absent' waere kein Erfolg.
+  Zugehoerige Actions-Laeufe, beide auf demselben Head-SHA und beide conclusion=success:
+  id=31900303242 (Factory CI, event=pull_request) und id=31900284150 (Factory CI, event=push).
+  Der Job factory-checks fuehrt den kanonischen Runner, den Projekt-Test-Adapter und die
+  automatisch entdeckte Testsuite aus; die 16 in diesem Paket neu hinzugekommenen Testfaelle liefen
+  dort mit, ohne irgendwo registriert worden zu sein (F-19 im echten Betrieb). Anmerkung zur
+  Aussagekraft: in der CI laeuft keine Claude-Code-Sandbox, die sandbox-abhaengigen Tests werden
+  dort also als SANDBOX_VERIFICATION: not_performed ausgewiesen und zaehlen nicht als bestanden --
+  ihr realer Nachweis stammt aus dem lokalen Lauf dieser Sitzung (ci_tests_skipped: 0,
+  SANDBOX_VERIFICATION: performed), siehe Verification Evidence.
+Review Artifact: factory/reviews/FACTORY-FINAL-REAUDIT-1.round-1.md
+Human Decision (FACTORY_CHANGE): Punkt 5 des FACTORY_CHANGE-Ablaufs verlangt eine menschliche
+  Entscheidung, weil eine Kontrollebene, die ihre eigene Reparatur allein freigibt, keine Kontrolle
+  ist. Sie liegt in zwei getrennten Handlungen des Projektinhabers vor: (1) Der ausdrueckliche
+  Auftrag, diesen finalen Re-Audit nach FACTORY_CHANGE-Regeln durchzufuehren und bis Closure und
+  Merge zu bringen, wurde in Kenntnis seines FACTORY_CHANGE-Charakters erteilt, einschliesslich der
+  ausdruecklichen Vorgabe, geschuetzte Dateien nicht selbst zu entsperren und alle geschuetzten
+  Aenderungen in einem externen Apply-Paket zu buendeln. (2) Der externe Apply-Schritt wurde
+  bewusst manuell im normalen Terminal ausgefuehrt; sein Skriptkopf legt offen, dass es ein
+  FACTORY_CHANGE ist, welche sechs Dateien er schreibt und dass das Manifest neu gestempelt wird.
+  Die Entscheidung wird nicht aus dem PASS des Reviewers abgeleitet.
+Review History: Runde 1 endete mit Result PASS (Reviewed Scope Hash
+  sha256:bd333f85413813c2718a75301d36770e2e49d9f6bc3d3329177e1edad380a0c9, Reviewer Agent Type
+  finding-closure-reviewer). Der Reviewer hat den gesamten Control-Plane-Diff als FACTORY_CHANGE
+  gepruefft und die roten Evidence-Zahlen mechanisch gegen den heutigen Testtext rekonstruiert
+  statt sie zu uebernehmen; die Rueckwaertskompatibilitaet hat er selbst nachgeprueft (kein
+  wiederholter Feldname in irgendeinem der fuenf Findings) und die Manifest-Buchhaltung
+  nachgezaehlt (42 Hash-Zeilen, Diff genau sechs). Zwei nicht closure-blockierende Einwaende hat er
+  festgehalten; sie stehen unter Open Points nachfolgend und wurden nicht weggeschrieben.
+Open Points After Review: Der unabhaengige Reviewer hat in Runde 1 zwei konkrete, ausdruecklich
+  nicht closure-blockierende Einwaende erhoben, die bewusst NICHT mehr repariert wurden. Der Grund
+  ist derselbe, aus dem Paket 3 seine Restpunkte weitergereicht hat: beide liegen in
+  factory/guards/test_worktree_protection.py, einer geschuetzten Control-Plane-Datei, die der
+  implementierende Agent nicht schreiben kann; jede Reparatur haette einen zweiten externen
+  Apply-Schritt, eine Verschiebung des Scope-Hashes und damit den Verfall des soeben erteilten PASS
+  bedeutet. (1) UEBERZOGENE DOCSTRING: die Klassen-Docstring von DocumentationTests
+  (test_worktree_protection.py, 'No unproven parallelism claim may exist in the repository.') sagt
+  weiterhin 'im Repository', waehrend tatsaechlich vier benannte Dokumente auf Satzebene geprueft
+  werden. Das ist derselbe Fehlertyp, den Punkt B fuer CLAUDE.md beseitigt hat -- die
+  Anforderungsquelle fuer B (FACTORY-REAL-PROJECT-READINESS-1, Open Points For Re-Audit, Punkt B)
+  nennt allerdings ausschliesslich die CLAUDE.md-Formulierung, und der korrekte Geltungsbereich
+  steht im selben File unmittelbar darueber im Modulkommentar ('Deliberately NOT scanned:
+  factory/findings/**, ... factory/reviews/**') und darunter im DOCS-Tupel. Aus einer
+  Testdatei-Docstring wird keine Entscheidung abgeleitet. (2) KOSMETIK: der Modulkommentar
+  derselben Datei schreibt 'all nine of the formulations in POSITIVE_CORPUS below went undetected',
+  waehrend POSITIVE_CORPUS zehn Eintraege hat; die Evidence im Bauauftrag sagt korrekt 9/10. Ein
+  Kommentar, keine Pruefung. Beide sind P3/Improvement, keine P0- oder P1-Regression, und beide
+  sind hier festgehalten statt weggeschrieben. Vom Reviewer zusaetzlich benannte Restrisiken, alle
+  ohne Sicherheitswirkung und im Code bzw. in CLAUDE.md offengelegt: RULED_OUT_RE ist bewusst
+  lenient (ein Satz wie 'Frueher war das anders: parallele Worktrees sind jetzt unterstuetzt' kaeme
+  durch); die Umstellung von test_no_document_claims_parallel_worktree_safety ist nicht in jeder
+  Richtung strenger (ein Satz mit einer der drei alten Wendungen UND einem Ausschlussmarker wird
+  jetzt durchgelassen), netto aber deutlich breiter (10 statt 1 erkannte Formulierung); zwei der
+  vier geprueften Dokumente enthalten ueberhaupt keinen Parallelitaetsterminus, und ein geloeschtes
+  Dokument wird still uebersprungen; test_a_finding_worktree_is_not_advertised_as_routine prueft
+  zwei Literale, eine andere Formulierung wuerde nicht anschlagen; und die neue Duplikatregel macht
+  zwei gleichnamige Spalte-0-Zeilen im Analyse-Abschnitt zum harten Fehler, was als gewolltes neues
+  Rot im Blast Radius dokumentiert ist.
 Known Limitations: Zwei Punkte bleiben nach diesem Paket offen und werden nicht weggeschrieben.
   (1) Der Preflight endet auf dieser Maschine BLOCKED, aus zwei Gruenden, die beide nichts mit
   A bis D zu tun haben: unbekannte Shell-Freigaben in .claude/settings.local.json (Altbestand
