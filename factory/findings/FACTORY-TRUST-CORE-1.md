@@ -1,0 +1,42 @@
+# FACTORY-TRUST-CORE-1
+
+Status: IMPLEMENTING
+Severity: P1
+
+## Befund
+
+Der unabhängige Audit der Software Factory v1 (`FACTORY_V1_AUDIT_COMPLETE`) hat gezeigt, dass die
+zentrale Kontrollzusage der Factory — "ein Finding wird nur geschlossen und gemergt, wenn genau
+dieses Finding, genau dieser Codezustand und genau die externe CI von den vorgesehenen
+unabhängigen Kontrollmechanismen geprüft wurden" — technisch nicht durchgesetzt war. Zehn
+Einzelbefunde (F-01 bis F-09 und F-17) sind Ausprägungen desselben Problems: es fehlte an jeder
+Stelle die *Bindung* zwischen Behauptung und geprüftem Gegenstand.
+
+Reproduziert wurde unter anderem: ein Finding erreichte `CLOSED`, während `factory/reviews/`
+vollständig leer war — es genügte, `Review Artifact:` auf einen selbst geschriebenen Bauauftrag
+mit einer Zeile `Result: PASS` zu richten. Alle vier Prüfschichten (lokale Validatoren,
+kanonischer Runner, Stop-Hook, GitHub-CI) meldeten dabei `ALLE BESTANDEN`.
+
+**Severity-Begründung:** `P1`, nicht `P0`. Die Befunde betreffen die Kontrollebene der Factory
+selbst, es gibt keinen Hinweis auf laufende Ausnutzung und keinen unmittelbaren
+Produktionsschaden — die Vorlage enthält keinen Produktcode. `P0` ist laut `CLAUDE.md` für akute,
+laufende Ausnutzung reserviert; diese Einstufung hier als `P0` zu wählen wäre inhaltlich falsch
+und würde den neu eingebauten P0-Stopp zugleich unpassend auslösen.
+
+**Dies ist ein `FACTORY_CHANGE`.** Der Auftrag verändert die Kontrollebene, die ihn normalerweise
+kontrollieren würde. Die alte Kontrollebene kann ihre eigene Reparatur nicht beweisen; siehe
+`Verification Evidence` für die ausdrückliche Bootstrap-Dokumentation.
+
+## Analyse
+
+Root Cause: An jeder Übergabestelle des Lebenszyklus wurde eine Behauptung geprüft statt einer Bindung. Der Closure-Gate suchte in einer beliebigen Datei nach der Zeichenkette "Result: PASS", statt das kanonische Review-Artefakt genau dieses Findings zu verlangen (F-01); nichts verband Review und Finding (F-02) oder Review und Codezustand (F-03); Review-Runden überschrieben sich, sodass ein FAIL spurlos verschwand (F-04); die Guards selbst waren aus einem normalen Finding heraus schreibbar und wurden in CI aus dem PR-Head ausgeführt (F-05); CI-Evidence war unprüfbarer Freitext (F-06); GitHub-API-Fehler waren von leeren Normalzuständen nicht unterscheidbar (F-07); der Required Check wurde nie deterministisch bestimmt und der Merge nicht an einen SHA gebunden (F-08); Severity existierte technisch nicht, P0 war reine Prosa (F-09); und der Repository-Slug wurde ohne Validierung aus origin abgeleitet (F-17).
+Affected Components: factory/guards/validate-finding.py, factory/guards/validate-review.py, factory/guards/run-factory-checks.py, factory/scripts/gh-api.sh, factory/scripts/gh-query.sh, factory/scripts/factory-preflight.sh, .claude/hooks/subagentstop-write-review.py, .claude/settings.json, .github/workflows/factory-ci.yml sowie die zugehörigen Regel- und Formatdokumente.
+Relevant Architecture: Die Factory hat vier Prüfschichten (Validatoren, kanonischer Runner, lokaler Stop-Hook, externe GitHub-CI mit Required Status Check), aber nur eine Prüflogik pro Check-Art. Die Schichtung war korrekt; falsch war, was die unterste Schicht tatsächlich prüfte. Der SubagentStop-Hook ist der einzige vertrauenswürdige Schreiber von Review-Artefakten, weil er aus echten Claude-Code-Ereignisdaten schreibt und der implementierende Agent auf factory/reviews/ keinen Schreibzugriff hat.
+Recommended Repair: Jede Behauptung an eine deterministisch prüfbare Bindung koppeln. Review-Artefakte bekommen einen kanonischen, append-only Rundenpfad factory/reviews/<ID>.round-<N>.md, ihre Identität wird gegen das Finding geprüft, und der Hook stempelt einen Scope-Hash über alle getrackten Dateien außer findings/ und reviews/ ein, den der Closure-Gate neu berechnet und vergleicht. Die Kontrollebene wird über ein gestempeltes Manifest in CI geprüft und aus den lokalen Schreibrechten entfernt. Die GitHub-Schicht bekommt HTTP-Statusauswertung, Slug-Validierung, ein deterministisches required-check-Urteil mit Exit-Code und einen SHA-gebundenen Merge. Severity wird Pflichtfeld mit hartem P0-Stopp.
+Regression Test Plan: Negativtests zuerst, gegen die unveränderten Guards rot beobachtet. factory/guards/test_trust_core.py deckt Review-Pfad, Identität, Scope-Bindung, Runden und den P0-Stopp ab; test_control_plane.py deckt Manifest-Drift je Control-Plane-Kategorie ab; test_gh_evidence.py deckt alle Check-Run-Zustände, gleichnamige Runs, Paginierung, die sechs HTTP-Fehlerklassen, den Merge-Precheck und die Slug-Normalisierung ab. Bestehende Tests, die die unsichere Semantik ausdrücklich erwarteten, wurden umgedreht statt gelöscht.
+Central Guard Plan: Drei zentrale Guards statt punktueller Prüfungen. validate-finding.py erzwingt die achtteilige Closure-Bindung und den P0-Stopp; validate-control-plane.py vergleicht die Kontrollebene gegen factory/control-plane.sha256 und läuft im kanonischen Runner, also in jedem CI-Lauf; gh_evidence.py ist die einzige Stelle, an der GitHub-Antworten interpretiert werden, und ist ohne Netz testbar.
+Expected Blast Radius: Ausschließlich die Factory-Infrastruktur. Kein Produktcode ist betroffen, weil die Vorlage keinen enthält. Für bestehende Kopien ist die Änderung nicht rückwärtskompatibel: Review-Artefakte im alten Format <ID>.md werden abgelehnt, Findings ohne Severity ab ANALYZED ebenfalls, und gh-query.sh merge verlangt jetzt einen dritten Parameter.
+Risk Assessment: Das Risiko der Änderung liegt vor allem in falschem Rot, nicht in falschem Grün: der Scope-Hash bindet an alle getrackten Dateien, sodass eine Änderung nach dem Review konsequent einen neuen Review-Durchgang erzwingt. Das ist gewollt und der Kern der Reparatur, kostet aber eine Review-Runde, wenn nach dem Review noch etwas am Code korrigiert wird. Das Risiko des Nichtstuns ist deutlich höher: ohne diese Bindungen ist ein grünes CLOSED ein Formular ohne Beweiswert, und die Factory wäre als Basis für reale Sicherheitsarbeit ungeeignet.
+Verification Evidence: Not yet analyzed
+CI Evidence: Not yet analyzed
+Review Artifact: Not yet analyzed

@@ -109,7 +109,11 @@ REQUIRED_FILES=(
   "factory/guards/run-factory-checks.py"
   "factory/guards/validate-finding.py"
   "factory/guards/validate-review.py"
+  "factory/guards/validate-control-plane.py"
+  "factory/guards/scope_hash.py"
+  "factory/guards/gh_evidence.py"
   "factory/guards/run-project-tests.py"
+  "factory/control-plane.sha256"
   "factory/scripts/gh-api.sh"
   "factory/scripts/gh-query.sh"
   "factory/scripts/create-finding-worktree.sh"
@@ -156,12 +160,19 @@ if sandbox.get("enabled") is not True:
 if sandbox.get("allowUnsandboxedCommands") is not False:
     problems.append("sandbox.allowUnsandboxedCommands ist nicht false")
 
+# The control plane: everything that decides whether work may proceed, or
+# that produces the evidence such a decision rests on. Normal finding work
+# must not be able to change any of it (audit finding F-05).
 deny_write = sandbox.get("filesystem", {}).get("denyWrite", [])
 for required in [
     "./factory/reviews",
+    "./factory/guards",
+    "./factory/scripts",
     "./.claude/hooks",
     "./.claude/skills",
     "./.claude/agents",
+    "./.claude/rules",
+    "./.github/workflows",
     "./.claude/settings.json",
     "./.claude/settings.local.json",
 ]:
@@ -172,12 +183,20 @@ deny = data.get("permissions", {}).get("deny", [])
 for required in [
     "Edit(/factory/reviews/**)",
     "Write(/factory/reviews/**)",
+    "Edit(/factory/guards/**)",
+    "Write(/factory/guards/**)",
+    "Edit(/factory/scripts/**)",
+    "Write(/factory/scripts/**)",
     "Edit(/.claude/hooks/**)",
     "Write(/.claude/hooks/**)",
     "Edit(/.claude/skills/**)",
     "Write(/.claude/skills/**)",
     "Edit(/.claude/agents/**)",
     "Write(/.claude/agents/**)",
+    "Edit(/.claude/rules/**)",
+    "Write(/.claude/rules/**)",
+    "Edit(/.github/workflows/**)",
+    "Write(/.github/workflows/**)",
     "Edit(/.claude/settings.json)",
     "Write(/.claude/settings.json)",
 ]:
@@ -224,7 +243,7 @@ PY
       ;;
     *)
       missing ".claude/settings.json unvollstaendig: ${SETTINGS_REPORT#PROBLEMS }" \
-        ".claude/settings.json aus der Factory-Vorlage uebernehmen (Sandbox-denyWrite, Edit/Write-Deny auf factory/reviews, .claude/hooks, .claude/skills, .claude/agents, .claude/settings.json sowie Stop- und SubagentStop-Hook)."
+        ".claude/settings.json aus der Factory-Vorlage uebernehmen. Gesperrt sein muss die gesamte Kontrollebene -- factory/reviews, factory/guards, factory/scripts, .claude/hooks, .claude/skills, .claude/agents, .claude/rules, .github/workflows und die Settings-Dateien selbst -- jeweils per permissions.deny UND sandbox.filesystem.denyWrite; dazu Stop- und SubagentStop-Hook."
       ;;
   esac
 fi
@@ -268,10 +287,11 @@ required = [
     "Write(/factory/findings/**)",
     "Edit(/factory/build-orders/**)",
     "Write(/factory/build-orders/**)",
-    "Edit(/factory/guards/**)",
-    "Write(/factory/guards/**)",
-    "Edit(/factory/scripts/**)",
-    "Write(/factory/scripts/**)",
+    # Deliberately NOT here: write access to factory/guards/ and
+    # factory/scripts/. The proven routine never writes there -- it only
+    # runs those files. Granting it was audit finding F-05: it let a normal
+    # finding change the guards and the CI/merge helper that judge it,
+    # without a single approval prompt.
     # Read-only access for the independent finding-closure-reviewer subagent.
     "Read(%s/**)" % root,
 ]
@@ -285,12 +305,25 @@ too_broad = [
     "Bash(*)",
     "Bash(curl *)",
     "Bash(python3 *)",
+    "Bash(python3 -)",
     "Bash(python *)",
     "Bash(git *)",
     "Bash(git -C *)",
     "Bash(bash *)",
     "Bash(sh *)",
+    "Bash(zsh *)",
     "Bash(gh *)",
+    # Write access to the control plane is never part of routine work
+    # (audit finding F-05). A FACTORY_CHANGE is a separate, deliberate
+    # workflow -- not something a normal finding run should be able to do.
+    "Edit(/factory/guards/**)",
+    "Write(/factory/guards/**)",
+    "Edit(/factory/scripts/**)",
+    "Write(/factory/scripts/**)",
+    "Edit(/.claude/**)",
+    "Write(/.claude/**)",
+    "Edit(/.github/**)",
+    "Write(/.github/**)",
 ]
 
 if not os.path.isfile(path):
@@ -341,6 +374,26 @@ if [ -f "$ROOT/.gitignore" ] && grep -q "settings.local.json" "$ROOT/.gitignore"
 else
   missing ".claude/settings.local.json ist nicht in .gitignore." \
     "'.claude/settings.local.json' in .gitignore eintragen -- maschinenspezifische Pfade/Rechte gehoeren nie in die Vorlage."
+fi
+
+# --- 6b. Control-plane manifest ---------------------------------------------
+#
+# The server-side half of the F-05 protection: the guards, scripts, hooks,
+# rules and CI workflow must match their stamped manifest. Checked here too
+# so a fresh copy of the template is verified before the first finding run,
+# not only once CI rejects one.
+
+CONTROL_PLANE_GUARD="$ROOT/factory/guards/validate-control-plane.py"
+if [ -f "$CONTROL_PLANE_GUARD" ]; then
+  if CONTROL_PLANE_OUT="$(python3 "$CONTROL_PLANE_GUARD" --repo-root "$ROOT" 2>&1)"; then
+    ok "Control-Plane unveraendert gegenueber factory/control-plane.sha256."
+  else
+    missing "Control-Plane weicht vom Manifest ab: $(printf '%s' "$CONTROL_PLANE_OUT" | /usr/bin/tr '\n' ' ')" \
+      "Pruefen, warum eine Guard-/Skript-/Hook-/Regel-/CI-Datei vom gestempelten Stand abweicht. Ist die Aenderung beabsichtigt, ist sie ein FACTORY_CHANGE (eigener Branch, unabhaengiger Review des Control-Plane-Diffs, menschliche Entscheidung) und wird danach mit 'python3 factory/guards/validate-control-plane.py --update' neu gestempelt."
+  fi
+else
+  missing "Control-Plane-Guard fehlt: factory/guards/validate-control-plane.py" \
+    "Datei aus der Factory-Vorlage uebernehmen."
 fi
 
 # --- 7. GitHub / network checks ---------------------------------------------

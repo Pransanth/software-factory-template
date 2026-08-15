@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,7 +36,11 @@ REQUIRED_FILES = [
     "factory/guards/run-factory-checks.py",
     "factory/guards/validate-finding.py",
     "factory/guards/validate-review.py",
+    "factory/guards/validate-control-plane.py",
+    "factory/guards/scope_hash.py",
+    "factory/guards/gh_evidence.py",
     "factory/guards/run-project-tests.py",
+    "factory/control-plane.sha256",
     "factory/scripts/gh-api.sh",
     "factory/scripts/gh-query.sh",
     "factory/scripts/create-finding-worktree.sh",
@@ -46,6 +51,15 @@ REQUIRED_FILES = [
     ".claude/rules/factory-workflow.md",
     ".claude/settings.json",
     ".github/workflows/factory-ci.yml",
+]
+
+# These must be the real, working scripts in the fixture: the preflight now
+# actually RUNS the control-plane guard rather than only checking that a file
+# with that name exists (audit finding F-14 is not in this package, but the
+# control-plane check added for F-05 has to execute to mean anything).
+REAL_FILES_TO_COPY = [
+    "factory/guards/validate-control-plane.py",
+    "factory/guards/scope_hash.py",
 ]
 
 GIT_ENV_OVERRIDES = {
@@ -94,6 +108,28 @@ class FactoryPreflightTests(unittest.TestCase):
             if not path.exists():
                 path.write_text("placeholder\n", encoding="utf-8")
         shutil.copy2(REAL_SETTINGS_JSON, self.root / ".claude" / "settings.json")
+        for rel in REAL_FILES_TO_COPY:
+            shutil.copy2(REPO_ROOT / rel, self.root / rel)
+
+    def stamp_control_plane(self):
+        """Track the fixture's files and stamp the control-plane manifest.
+
+        The control-plane guard reads `git ls-files`, so the fixture has to
+        be a real repository with its files added, not just a directory.
+        """
+        _git(self.root, "add", "-A")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "factory" / "guards" / "validate-control-plane.py"),
+                "--repo-root",
+                str(self.root),
+                "--update",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def make_gitignore(self):
         (self.root / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
@@ -223,6 +259,7 @@ class FactoryPreflightTests(unittest.TestCase):
         self.make_required_files()
         self.make_gitignore()
         self.write_local_settings(self.suggested_allow_list())
+        self.stamp_control_plane()
 
         result = self.run_preflight("--local-only")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -235,8 +272,65 @@ class FactoryPreflightTests(unittest.TestCase):
         self.make_required_files()
         self.make_gitignore()
         self.write_local_settings(self.suggested_allow_list())
+        self.stamp_control_plane()
         result = self.run_preflight("--local-only")
         self.assertIn("Netzwerk-/GitHub-Pruefungen uebersprungen", result.stdout)
+
+    # -- control plane (audit finding F-05) --------------------------------
+
+    def test_control_plane_drift_is_reported(self):
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list())
+        self.stamp_control_plane()
+
+        # A normal finding run must never be able to do this unnoticed.
+        (self.root / "factory" / "guards" / "validate-finding.py").write_text(
+            "# quietly weakened\n", encoding="utf-8"
+        )
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Control-Plane weicht vom Manifest ab", result.stdout)
+        self.assertIn("FACTORY_CHANGE", result.stdout)
+
+    def test_control_plane_guard_is_actually_executed_not_just_present(self):
+        """A file that merely exists under that name is not a guard."""
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.write_local_settings(self.suggested_allow_list())
+        # No manifest stamped at all.
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Control-Plane", result.stdout)
+
+    def test_control_plane_write_grants_are_rejected_as_too_broad(self):
+        """Granting write access to the guards was audit finding F-05."""
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        self.stamp_control_plane()
+        self.write_local_settings(
+            self.suggested_allow_list() + ["Edit(/factory/guards/**)"]
+        )
+        result = self.run_preflight("--local-only")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Zu breite lokale Freigaben", result.stdout)
+        self.assertIn("Edit(/factory/guards/**)", result.stdout)
+
+    def test_suggested_allow_list_does_not_grant_control_plane_writes(self):
+        self.make_git_repo()
+        self.make_required_files()
+        self.make_gitignore()
+        allow = self.suggested_allow_list()
+        for forbidden in (
+            "Edit(/factory/guards/**)",
+            "Write(/factory/guards/**)",
+            "Edit(/factory/scripts/**)",
+            "Write(/factory/scripts/**)",
+        ):
+            self.assertNotIn(forbidden, allow)
 
     def test_usage_error_on_unknown_argument(self):
         result = self.run_preflight("--wat")

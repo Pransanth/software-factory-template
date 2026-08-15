@@ -79,7 +79,9 @@ Genau vier Situationen beenden den unbeaufsichtigten Lauf. Alles andere ist Rout
 
 1. **P0** — ein Befund mit akuter, laufender Ausnutzung bzw. unmittelbarem Produktionsschaden.
    Ein P0 wird nicht autonom durchgearbeitet: Befund festhalten, Sofortlage beschreiben, stoppen,
-   Menschen einbeziehen.
+   Menschen einbeziehen. Das ist **technisch erzwungen**, nicht nur hier beschrieben: jedes
+   Finding trägt ab `ANALYZED` ein Pflichtfeld `Severity:` (`P0`–`P3`), und der Guard lässt für
+   `Severity: P0` ausschließlich die Zustände `OPEN`, `ANALYZED` und `EXPERT_REVIEW_REQUIRED` zu.
 2. **`EXPERT_REVIEW_REQUIRED`** — Claude selbst oder der unabhängige Reviewer stellt fest, dass
    eine autonome Entscheidung nicht verantwortbar ist (ungewöhnlich hohes technisches Risiko,
    große Unsicherheit über die Auswirkungen, potenziell irreversible Konsequenzen). Status setzen,
@@ -99,13 +101,26 @@ Kontrolle einem Fix im Weg steht, ist das ein Signal, den Fix oder die Analyse z
 nicht die Kontrolle zu schwächen.
 
 Das gilt ausdrücklich auch für die Grenzen der Factory selbst: **Während eines Findings werden
-keine Sicherheitsgrenzen gelockert.** `factory/reviews/`, `.claude/hooks/`, `.claude/skills/`,
-`.claude/agents/`, `.claude/settings.json` und `.claude/settings.local.json` sind gegen
-Selbstveränderung geschützt (`.claude/settings.json` → `permissions.deny` und
-`sandbox.filesystem.denyWrite`). Ein Finding, das diese Pfade anfassen will, ist per Definition
-außerhalb seines Scopes. Auch die richtige Reaktion auf eine Approval-Abfrage ist **nie**, die
-Berechtigungen zu erweitern, sondern den Befehl in die unten beschriebene einfache Form zu
-bringen.
+keine Sicherheitsgrenzen gelockert.** Die gesamte Kontrollebene ist gegen Selbstveränderung
+geschützt:
+
+```
+factory/reviews/**       factory/guards/**        factory/scripts/**
+.claude/hooks/**         .claude/agents/**        .claude/skills/**
+.claude/rules/**         .claude/settings*.json   .github/workflows/**
+CLAUDE.md
+```
+
+Der Schutz ist zweischichtig: lokal über `permissions.deny` und `sandbox.filesystem.denyWrite`
+in `.claude/settings.json`, und — verbindlich, weil serverseitig — über
+[`factory/guards/validate-control-plane.py`](factory/guards/validate-control-plane.py), das
+diese Pfade in jedem CI-Lauf gegen das gestempelte Manifest `factory/control-plane.sha256`
+prüft. Ein Finding, das diese Pfade anfassen will, ist per Definition außerhalb seines Scopes;
+eine beabsichtigte Änderung daran ist ein **`FACTORY_CHANGE`** mit eigenem, strengerem Ablauf
+(siehe [`.claude/rules/factory-workflow.md`](.claude/rules/factory-workflow.md)).
+
+Auch die richtige Reaktion auf eine Approval-Abfrage ist **nie**, die Berechtigungen zu
+erweitern, sondern den Befehl in die unten beschriebene einfache Form zu bringen.
 
 ## Git-Routine: einfache Befehle aus dem Repo-Verzeichnis, nie `git -C <pfad>`
 
@@ -248,7 +263,7 @@ läuft über zwei Skripte, die je als ein einziger, statisch erkennbarer Befehl 
   Datei, kein Token in der Ausgabe.
 - [`factory/scripts/gh-query.sh`](factory/scripts/gh-query.sh) — feste Unterbefehle für die
   Routine: `repo`, `default-branch`, `pr`, `pr-summary`, `pr-create`, `check-runs`,
-  `check-runs-summary`, `actions-run`, `actions-run-summary`, `actions-jobs`,
+  `check-runs-summary`, `required-check`, `actions-run`, `actions-run-summary`, `actions-jobs`,
   `actions-jobs-summary`, `branch-rules`, `required-checks`, `merge`.
 
 Die `-summary`-Unterbefehle existieren genau deshalb, damit für eine Routineabfrage **kein**
@@ -256,9 +271,22 @@ inline `python3 -c`, keine Pipeline und keine Zwischen-JSON-Datei nötig ist: Je
 `key: value`-Zeilen auf stdout. Wer eine Routineabfrage per Pipeline oder Temp-Datei nachbaut,
 erzeugt genau die Approval-Abfrage, die diese Skripte vermeiden.
 
+**Die Merge-Entscheidung wird nicht aus Prosa gelesen.** Dafür gibt es zwei feste Regeln:
+
+- `factory/scripts/gh-query.sh required-check <SHA> [NAME]` liefert **genau ein** Urteil
+  (`success`, `failed`, `pending`, `absent`, `api_error`) und einen eindeutigen Exit-Code
+  (`0/1/2/3/4`). Nur Exit 0 darf zu einem Merge führen. `absent` ist kein Erfolg: "der Check ist
+  nicht da" ist nicht "der Check ist grün".
+- `factory/scripts/gh-query.sh merge <PR> <METHOD> <ERWARTETER-HEAD-SHA>` verlangt den Head-SHA,
+  für den CI-Evidence und Review tatsächlich vorliegen. Er wird lokal geprüft und zusätzlich an
+  die GitHub-Merge-API übergeben, sodass ein zwischenzeitlich eingetroffener Push den Merge
+  serverseitig scheitern lässt statt mitzureisen.
+
+Ein API-Fehler (401, 403, 404, 422, 429, 5xx, Netzwerk) ist **niemals** ein leerer Normalzustand:
+alle Helfer melden `api_error:` und enden mit einem Exit-Code ungleich 0.
+
 Verbindlich ist der **Required Status Check** auf dem geschützten Default-Branch (Job `factory-checks`
-aus [`.github/workflows/factory-ci.yml`](.github/workflows/factory-ci.yml)). Gemerged wird
-ausschließlich, wenn dieser Check für genau den aktuellen Head-SHA `completed/success` ist. Ein
-roter CI-Lauf wird repariert, nicht umgangen; ein abgelehnter Merge wird gemeldet, nicht
-erzwungen. Nach dem Merge wird der tatsächliche Remote-Stand verifiziert
-(`git fetch origin` + `git rev-parse origin/<default-branch>`), nicht angenommen.
+aus [`.github/workflows/factory-ci.yml`](.github/workflows/factory-ci.yml)). Ein roter CI-Lauf
+wird repariert, nicht umgangen; ein abgelehnter Merge wird gemeldet, nicht erzwungen. Nach dem
+Merge wird der tatsächliche Remote-Stand verifiziert (`git fetch origin` +
+`git rev-parse origin/<default-branch>`), nicht angenommen.

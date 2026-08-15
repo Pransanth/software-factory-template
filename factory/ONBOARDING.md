@@ -22,9 +22,10 @@ Berechtigungen und erstellt keinen PR. Es prüft, erklärt — und wird danach e
 | 1 | Eigenständiges Git-Repository | Die Factory arbeitet auf ihrem eigenen Repo, nicht als Unterverzeichnis eines fremden. |
 | 2 | `origin` vorhanden und auf github.com | PR, CI und Merge laufen über die GitHub-REST-API. |
 | 3 | Factory-Kerndateien vollständig | Guards, Hooks, Reviewer, Skill, CI, Regeln. |
-| 4 | Geschützte Dateien in `.claude/settings.json` | `factory/reviews/`, `.claude/hooks/`, `.claude/skills/`, `.claude/agents/`, `settings.json`/`settings.local.json` sind gegen Selbstveränderung gesperrt; Stop- und SubagentStop-Hook sind registriert; die Routine ist **nicht** pauschal verboten. |
-| 5 | Lokale Allows in `.claude/settings.local.json` | Genau die Befehlsformen der Factory-Routine — eng gefasst, keine breiten `Bash(*)`/`curl`/`python3`-Freigaben; dazu der read-only `Read(<repo>/**)`-Zugriff für den unabhängigen Reviewer. |
+| 4 | Geschützte Kontrollebene in `.claude/settings.json` | `factory/reviews/`, `factory/guards/`, `factory/scripts/`, `.claude/hooks/`, `.claude/skills/`, `.claude/agents/`, `.claude/rules/`, `.github/workflows/` und die Settings-Dateien sind gegen Selbstveränderung gesperrt (`permissions.deny` **und** `sandbox.filesystem.denyWrite`); Stop- und SubagentStop-Hook sind registriert; die Routine ist **nicht** pauschal verboten. |
+| 5 | Lokale Allows in `.claude/settings.local.json` | Genau die Befehlsformen der Factory-Routine — eng gefasst, keine breiten `Bash(*)`/`curl`/`python3`-Freigaben und **kein** Schreibzugriff auf die Kontrollebene; dazu der read-only `Read(<repo>/**)`-Zugriff für den unabhängigen Reviewer. |
 | 6 | `.gitignore` schließt `settings.local.json` aus | Maschinenspezifische Pfade gehören nie in die Vorlage. |
+| 6b | Control-Plane-Manifest aktuell | `factory/control-plane.sha256` muss zum tatsächlichen Stand der Guards, Skripte, Hooks, Regeln und CI passen. Weicht etwas ab, ist entweder die Kopie unvollständig oder jemand hat die Kontrollebene verändert. |
 | 7 | Default-Branch live vom Remote ermittelbar | Kein geratener Branchname; Konvention ist `origin/<default-branch>`. |
 | 8 | Repo-spezifisches GitHub-Credential | `gh-api.sh` nutzt den git-credential-Helper; der Wert wird nie ausgegeben. |
 | 9 | GitHub-API erreichbar, `gh-api.sh` funktioniert | Ohne `gh`-CLI. |
@@ -84,9 +85,15 @@ Ist der Preflight grün, läuft die normale Finding-Arbeit unbeaufsichtigt durch
 - `git add` / `git commit` / `git fetch origin` / `git push origin <branch>`
 - PR erstellen (`gh-query.sh pr-create`), Status abfragen (`pr-summary`,
   `check-runs-summary`, `actions-run-summary`, `actions-jobs-summary`)
+- Required Check für genau einen SHA prüfen (`gh-query.sh required-check <SHA>`)
 - unabhängiges Review (`finding-closure-reviewer`) mit Review-Artefakt aus dem SubagentStop-Hook
 - `READY_FOR_CLOSURE` → `CLOSED`
-- Merge bei grünem Required Status Check (`gh-query.sh merge`) und Verifikation des Remote-Stands
+- Merge bei grünem Required Status Check und passendem Head-SHA
+  (`gh-query.sh merge <PR> <METHOD> <SHA>`) und Verifikation des Remote-Stands
+
+Was ebenfalls **nicht** ohne Weiteres läuft: jede Änderung an der Kontrollebene (Guards, Skripte,
+Hooks, Agent, Skills, Regeln, CI-Workflow, `CLAUDE.md`). Das ist ein `FACTORY_CHANGE` mit eigenem,
+strengerem Ablauf — siehe [`.claude/rules/factory-workflow.md`](../.claude/rules/factory-workflow.md).
 
 Was **nicht** ohne Weiteres läuft und auch nicht laufen soll: P0, `EXPERT_REVIEW_REQUIRED`, echte
 Produkt-/Scope-Entscheidungen und `AUTONOMY_BLOCKER` — siehe `CLAUDE.md`, "Wann die Factory

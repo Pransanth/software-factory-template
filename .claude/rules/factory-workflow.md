@@ -25,6 +25,26 @@ Jeder andere Statuswert ist ungültig und wird vom Guard abgelehnt.
 Die Analysefelder dürfen fehlen oder als "noch nicht analysiert" markiert sein (z. B. `Not yet
 analyzed`, `TBD`). Es reicht, dass der Befund selbst beschrieben ist.
 
+## Severity und der P0-Stopp
+
+Jedes Finding trägt ab `ANALYZED` ein Pflichtfeld `Severity:` mit genau einem der Werte `P0`,
+`P1`, `P2`, `P3`.
+
+| Severity | Bedeutung |
+|---|---|
+| `P0` | Akute, laufende Ausnutzung bzw. unmittelbarer Produktionsschaden. |
+| `P1` | Ernstes Sicherheitsproblem ohne Hinweis auf laufende Ausnutzung. |
+| `P2` | Wichtig, aber kein unmittelbarer Blocker. |
+| `P3` | Kleineres Robustheits-/Wartbarkeitsproblem. |
+
+**Ein `P0` durchläuft die normale autonome Pipeline nicht.** Erlaubt sind für ein `P0`
+ausschließlich die Zustände `OPEN`, `ANALYZED` und `EXPERT_REVIEW_REQUIRED`. Der Versuch, ein
+`P0` auf `IMPLEMENTING`, `VERIFYING`, `READY_FOR_CLOSURE` oder `CLOSED` zu setzen, ist ein harter
+Guard-Fehler. Befund festhalten, Sofortlage beschreiben, stoppen, Menschen einbeziehen.
+
+Das ist bewusst eine technische Regel und keine Formulierung in `CLAUDE.md`: eine Regel, die nur
+im Fließtext steht, ist keine Kontrolle.
+
 ### `ANALYZED` und alle nachfolgenden Zustände (`IMPLEMENTING`, `VERIFYING`, `READY_FOR_CLOSURE`, `CLOSED`)
 
 Ab `ANALYZED` müssen mindestens diese acht Felder sinnvoll (nicht leer, kein Platzhalter)
@@ -76,11 +96,54 @@ ebenso sinnvoll (nicht leer, kein Platzhalter) ausgefüllte Felder:
 3. **Review Artifact** – der Pfad zu einem Review-Artefakt unter `factory/reviews/` (siehe
    [`factory/reviews/README.md`](../../factory/reviews/README.md)).
 
-Der Guard prüft zusätzlich **strukturell**, dass die unter `Review Artifact` referenzierte Datei
-tatsächlich existiert und `Result: PASS` enthält — ein referenziertes Review mit `Result: FAIL`
-oder `Result: EXPERT_REVIEW_REQUIRED` blockiert `READY_FOR_CLOSURE`/`CLOSED` genauso wie ein
-fehlendes Review. `CLOSED` erfüllt automatisch dieselben Anforderungen wie `READY_FOR_CLOSURE`
-(kein separates, schwächeres Regelwerk).
+### Die Bindung des Reviews an Finding und Codezustand
+
+`Review Artifact` ist kein freier Pfad. Der Guard verlangt **alle** folgenden Bedingungen —
+jede einzelne davon schließt eine Lücke, die der Factory-Audit tatsächlich reproduziert hat:
+
+1. Der Wert ist exakt `factory/reviews/<Finding-ID>.round-<N>.md`, wobei `<Finding-ID>` der
+   Dateiname dieses Findings ist. Absolute Pfade, `../`-Traversal und jedes andere Verzeichnis
+   werden abgelehnt.
+2. Der aufgelöste reale Pfad liegt innerhalb von `factory/reviews/` — ein Symlink kann nicht
+   hinausführen.
+3. Die Datei besteht `validate-review.py` vollständig. Es genügt **nicht**, dass sie irgendwo
+   eine Zeile `Result: PASS` enthält.
+4. Das Feld `Finding:` im Artefakt nennt genau dieses Finding. Ein `PASS` für Finding A kann
+   Finding B nicht schließen.
+5. Es ist die **höchste** vorhandene Runde dieses Findings, und die Runden `1..N` sind
+   lückenlos vorhanden. Eine ältere Runde schließt nicht, und eine FAIL-Runde kann nicht
+   verschwinden.
+6. `Result:` ist `PASS`. `FAIL` oder `EXPERT_REVIEW_REQUIRED` blockieren genauso wie ein
+   fehlendes Review.
+7. `Reviewed Scope Hash` entspricht dem aktuellen Scope-Hash des Repositories. **Ein `PASS`
+   verliert seine Gültigkeit, sobald sich der geprüfte Code ändert.**
+8. Keine frühere Runde trägt denselben Scope-Hash mit einem Ergebnis ungleich `PASS`.
+
+`CLOSED` erfüllt automatisch dieselben Anforderungen wie `READY_FOR_CLOSURE` (kein separates,
+schwächeres Regelwerk).
+
+### Review-Runden sind append-only
+
+Ein Review-Artefakt heißt `factory/reviews/<Finding-ID>.round-<N>.md` und wird **nie**
+überschrieben. Jede neue Review-Runde bekommt die nächste freie Nummer. Geschrieben werden sie
+ausschließlich vom `SubagentStop`-Hook, der dabei auch `Reviewer Agent Type`,
+`Reviewer Agent ID` und `Reviewed Scope Hash` setzt — keines dieser drei Felder stammt aus dem
+Text des Reviewers oder aus der Hand des implementierenden Agenten.
+
+Daraus folgt die Regel für den Umgang mit einem `FAIL`: **reparieren, dann neu reviewen.** Den
+Reviewer einfach erneut gegen denselben Codezustand zu befragen, bis er zustimmt, ergibt kein
+gültiges Closure — Punkt 8 oben lehnt genau das ab. `FAIL` → Änderung → neue Runde → `PASS` ist
+der legitime Weg und ausdrücklich vorgesehen.
+
+### Der Scope-Hash
+
+Der Scope-Hash ist ein SHA-256 über alle **getrackten** Dateien des Repositories mit Ausnahme von
+`factory/findings/` und `factory/reviews/` (siehe
+[`factory/guards/scope_hash.py`](../../factory/guards/scope_hash.py)). Die beiden Ausnahmen sind
+notwendig, damit der Workflow selbst funktioniert: nach dem Review werden `Review Artifact` und
+`Status` in das Finding geschrieben, und das Review-Artefakt selbst entsteht ja gerade. Alles,
+was ein Reviewer inhaltlich beurteilt — Produktcode, Tests, Guards, Skripte, Hooks, CI-Workflow,
+Bauaufträge — liegt **innerhalb** des Hashes.
 
 Der standardisierte Ablauf dorthin ist der [`verify-finding`-Skill](../skills/verify-finding/SKILL.md);
 das Review selbst führt der unabhängige, rein lesende
@@ -100,6 +163,41 @@ Die verpflichtende unabhängige Review vor `READY_FOR_CLOSURE` (siehe oben) ist 
 menschliche Freigabe — sie wird von einem separaten, rein lesenden Subagenten durchgeführt, nicht
 von einem Menschen. Sie stellt aber sicher, dass die Closure-Entscheidung nicht ausschließlich
 vom selben Agenten getroffen wird, der die Reparatur implementiert hat.
+
+## `FACTORY_CHANGE`: Änderungen an der Kontrollebene selbst
+
+Zur **Kontrollebene** gehört alles, was entscheidet, ob Arbeit weitergehen darf, oder das die
+Evidence für so eine Entscheidung erzeugt:
+
+```
+factory/guards/**        factory/scripts/**       .claude/hooks/**
+.claude/agents/**        .claude/skills/**        .claude/rules/**
+.claude/settings*.json   .github/workflows/**     CLAUDE.md
+```
+
+**Normale Finding-Arbeit verändert diese Pfade nicht.** Sie sind lokal per `permissions.deny`
+und `sandbox.filesystem.denyWrite` gesperrt, und — wichtiger, weil serverseitig — sie werden vom
+Guard [`validate-control-plane.py`](../../factory/guards/validate-control-plane.py) gegen das
+gestempelte Manifest `factory/control-plane.sha256` geprüft. Dieser Guard läuft im kanonischen
+Runner und damit in jedem CI-Lauf. Ein Branch, der einen Guard abschwächt, fällt dadurch auf,
+statt vom abgeschwächten Guard selbst geprüft zu werden.
+
+Ist eine Änderung an der Kontrollebene beabsichtigt, ist sie ein **`FACTORY_CHANGE`** und läuft
+strenger als ein normales Finding:
+
+1. Eigener Branch, ausschließlich für diese Änderung.
+2. Negativtests zuerst — die Lücke muss reproduzierbar rot sein, bevor sie geschlossen wird.
+3. Vollständige Testsuite und echte externe CI.
+4. Unabhängiger Review des **gesamten** Control-Plane-Diffs, nicht nur des Anlasses.
+5. Menschliche Entscheidung. Eine Kontrollebene, die ihre eigene Reparatur allein freigibt, ist
+   keine Kontrolle.
+6. Erst danach `python3 factory/guards/validate-control-plane.py --update` und erneut CI.
+
+**Ehrliche Grenze:** Wer eine Control-Plane-Datei *und* das Manifest im selben Commit ändert,
+besteht diesen Guard. Das ist unvermeidbar — ein Repository kann Vertrauen in sich selbst nicht
+aus sich selbst heraus herstellen. Was der Guard ändert, ist die Sichtbarkeit: aus einer stillen
+Nebenwirkung wird ein Manifest-Diff, den ein Review nicht übersehen kann, plus die ausdrückliche
+Erklärung, dass die Kontrollebene geändert werden sollte.
 
 ## Platzhalter, die nicht als "ausgefüllt" zählen
 

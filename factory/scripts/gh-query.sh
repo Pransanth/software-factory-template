@@ -1,172 +1,180 @@
 #!/usr/bin/env bash
-# Canonical, narrowly-scoped read-only GitHub/CI query helper for routine
-# factory automation. Wraps factory/scripts/gh-api.sh with fixed
-# subcommands so routine checks (PR status, check-runs, Actions runs/jobs,
-# ruleset/required-status-check status, repo metadata, merge) never need an
-# ad hoc `| python3 -c "..."` pipeline, and never need an intermediate JSON
-# file that would then have to be read back with a separate, unauthorized
-# tool call -- each subcommand is a single, statically recognizable command
-# shape with only plain-data arguments (PR number, commit SHA, branch name,
-# run id, merge method) that prints its result directly to stdout. No
-# token is ever printed; the credential-helper's benign "failed to store"
-# keychain-write noise (see gh-api.sh) is suppressed here so callers get
-# clean output on stdout.
+# Canonical, narrowly-scoped GitHub/CI query helper for routine factory
+# automation. Wraps factory/scripts/gh-api.sh with fixed subcommands so
+# routine checks never need an ad hoc `| python3 -c "..."` pipeline and never
+# need an intermediate JSON file -- each subcommand is a single, statically
+# recognizable command shape with only plain-data arguments (PR number,
+# commit SHA, branch name, run id, merge method) that prints "key: value"
+# lines on stdout. No token is ever printed.
 #
-# Two flavors of read subcommand:
-#   - The plain ones (repo, pr, check-runs, actions-run, actions-jobs,
-#     branch-rules) print the full raw JSON response, for callers that
-#     need more than the routine fields below.
-#   - The "-summary" ones (and default-branch, required-checks, merge)
-#     extract only the routine fields a caller actually needs for
-#     PR/CI/merge verification and print them as plain "key: value" lines
-#     on stdout -- no JSON parsing on the caller's side, no temp file.
+# All answer interpretation lives in factory/guards/gh_evidence.py, not in
+# inline snippets here. That module has its own tests
+# (factory/guards/test_gh_evidence.py), which is the only way the failure
+# modes below can be regression-tested without a network.
+#
+# Three audit findings shaped the current interface:
+#
+#   F-07: an API error used to be indistinguishable from an empty normal
+#   state ("no check runs yet" for a 401 or a rate limit). Every subcommand
+#   now propagates a non-zero exit code and prints `api_error: ...`.
+#
+#   F-08: the merge decision used to be made by reading an unfiltered list of
+#   check-run names as prose. `required-check` gives exactly one verdict and
+#   one exit code for one exact SHA and one exact check name, and handles
+#   queued/in_progress/cancelled/skipped/neutral/stale, several runs sharing
+#   the name (normal here: factory-ci.yml triggers on push AND pull_request),
+#   and incomplete pagination.
+#
+#   F-08: `merge` now REQUIRES the head SHA that was actually verified. It is
+#   checked locally first and then passed to GitHub's merge API as `sha`, so
+#   a push that landed after the CI/review evidence was collected makes the
+#   merge fail server-side instead of silently riding along.
 #
 # Usage:
 #   factory/scripts/gh-query.sh repo
 #   factory/scripts/gh-query.sh default-branch
 #   factory/scripts/gh-query.sh pr <NUMBER>
 #   factory/scripts/gh-query.sh pr-summary <NUMBER>
+#   factory/scripts/gh-query.sh pr-create <TITLE> <HEAD_BRANCH> <BASE_BRANCH> <BODY>
 #   factory/scripts/gh-query.sh check-runs <SHA>
 #   factory/scripts/gh-query.sh check-runs-summary <SHA>
+#   factory/scripts/gh-query.sh required-check <SHA> [CHECK_NAME]
 #   factory/scripts/gh-query.sh actions-run <BRANCH>
 #   factory/scripts/gh-query.sh actions-run-summary <BRANCH>
 #   factory/scripts/gh-query.sh actions-jobs <RUN_ID>
 #   factory/scripts/gh-query.sh actions-jobs-summary <RUN_ID>
 #   factory/scripts/gh-query.sh branch-rules <BRANCH>
 #   factory/scripts/gh-query.sh required-checks <BRANCH>
-#   factory/scripts/gh-query.sh merge <PR_NUMBER> <MERGE_METHOD>
-#   factory/scripts/gh-query.sh pr-create <TITLE> <HEAD_BRANCH> <BASE_BRANCH> <BODY>
-set -euo pipefail
+#   factory/scripts/gh-query.sh merge <PR_NUMBER> <MERGE_METHOD> <EXPECTED_HEAD_SHA>
+#
+# Exit codes for `required-check`: 0 success, 1 failed, 2 pending,
+# 3 absent, 4 api_error. Only 0 may lead to a merge.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GH_API="$SCRIPT_DIR/gh-api.sh"
+GH_EVIDENCE="$SCRIPT_DIR/../guards/gh_evidence.py"
 
-if [ "$#" -lt 1 ]; then
-  echo "usage: gh-query.sh {repo|default-branch|pr|pr-summary|pr-create|check-runs|check-runs-summary|actions-run|actions-run-summary|actions-jobs|actions-jobs-summary|branch-rules|required-checks|merge} [arg...]" >&2
+DEFAULT_REQUIRED_CHECK="${FACTORY_REQUIRED_CHECK:-factory-checks}"
+
+API_BODY=""
+API_RC=0
+
+usage() {
+  echo "usage: gh-query.sh {repo|default-branch|pr|pr-summary|pr-create|check-runs|check-runs-summary|required-check|actions-run|actions-run-summary|actions-jobs|actions-jobs-summary|branch-rules|required-checks|merge} [arg...]" >&2
   exit 2
-fi
+}
+
+# Run gh-api.sh, keeping both its body and its exit code. The body is kept
+# even on failure: it carries GitHub's own error message, which the evidence
+# module renders as `api_error: ...`.
+api_call() {
+  API_BODY="$("$GH_API" "$@" 2>/dev/null)"
+  API_RC=$?
+}
+
+# Feed the captured body to the evidence module and exit with a code that is
+# non-zero whenever either layer failed.
+render() {
+  local rendered_rc
+  printf '%s' "$API_BODY" | python3 "$GH_EVIDENCE" "$@"
+  rendered_rc=$?
+  if [ "$API_RC" -ne 0 ] && [ "$rendered_rc" -eq 0 ]; then
+    echo "api_error: gh-api.sh endete mit Exit $API_RC."
+    return 4
+  fi
+  return "$rendered_rc"
+}
+
+require_arg() {
+  [ -n "$1" ] || { echo "$2" >&2; exit 2; }
+}
+
+[ "$#" -ge 1 ] || usage
 
 SUBCOMMAND="$1"
 ARG="${2:-}"
 
 case "$SUBCOMMAND" in
   repo)
-    "$GH_API" GET "" 2>/dev/null
-    ;;
-  default-branch)
-    "$GH_API" GET "" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-print("default_branch:", data.get("default_branch"))
-'
+    api_call GET ""
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
     ;;
   pr)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh pr <NUMBER>" >&2; exit 2; }
-    "$GH_API" GET "/pulls/$ARG" 2>/dev/null
-    ;;
-  pr-summary)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh pr-summary <NUMBER>" >&2; exit 2; }
-    "$GH_API" GET "/pulls/$ARG" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-head = data.get("head", {})
-base = data.get("base", {})
-print("number:", data.get("number"))
-print("state:", data.get("state"))
-print("merged:", data.get("merged"))
-print("mergeable:", data.get("mergeable"))
-print("mergeable_state:", data.get("mergeable_state"))
-print("head_ref:", head.get("ref"))
-print("head_sha:", head.get("sha"))
-print("base_ref:", base.get("ref"))
-print("base_sha:", base.get("sha"))
-'
+    require_arg "$ARG" "usage: gh-query.sh pr <NUMBER>"
+    api_call GET "/pulls/$ARG"
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
     ;;
   check-runs)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh check-runs <SHA>" >&2; exit 2; }
-    "$GH_API" GET "/commits/$ARG/check-runs" 2>/dev/null
-    ;;
-  check-runs-summary)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh check-runs-summary <SHA>" >&2; exit 2; }
-    "$GH_API" GET "/commits/$ARG/check-runs" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-runs = data.get("check_runs", [])
-if not runs:
-    print("no check runs yet")
-for run in runs:
-    print(run.get("name"), "status=" + str(run.get("status")), "conclusion=" + str(run.get("conclusion")))
-'
+    require_arg "$ARG" "usage: gh-query.sh check-runs <SHA>"
+    api_call GET "/commits/$ARG/check-runs?per_page=100"
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
     ;;
   actions-run)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh actions-run <BRANCH>" >&2; exit 2; }
-    "$GH_API" GET "/actions/runs?branch=$ARG" 2>/dev/null
-    ;;
-  actions-run-summary)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh actions-run-summary <BRANCH>" >&2; exit 2; }
-    "$GH_API" GET "/actions/runs?branch=$ARG" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-runs = data.get("workflow_runs", [])
-if not runs:
-    print("no runs yet")
-for run in runs[:5]:
-    print(
-        "id=" + str(run.get("id")),
-        "name=" + str(run.get("name")),
-        "status=" + str(run.get("status")),
-        "conclusion=" + str(run.get("conclusion")),
-        "head_sha=" + str(run.get("head_sha")),
-    )
-'
+    require_arg "$ARG" "usage: gh-query.sh actions-run <BRANCH>"
+    api_call GET "/actions/runs?branch=$ARG&per_page=100"
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
     ;;
   actions-jobs)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh actions-jobs <RUN_ID>" >&2; exit 2; }
-    "$GH_API" GET "/actions/runs/$ARG/jobs" 2>/dev/null
-    ;;
-  actions-jobs-summary)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh actions-jobs-summary <RUN_ID>" >&2; exit 2; }
-    "$GH_API" GET "/actions/runs/$ARG/jobs" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for job in data.get("jobs", []):
-    print(job.get("name"), "status=" + str(job.get("status")), "conclusion=" + str(job.get("conclusion")))
-    for step in job.get("steps", []) or []:
-        print("  -", step.get("name"), "status=" + str(step.get("status")), "conclusion=" + str(step.get("conclusion")))
-'
+    require_arg "$ARG" "usage: gh-query.sh actions-jobs <RUN_ID>"
+    api_call GET "/actions/runs/$ARG/jobs?per_page=100"
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
     ;;
   branch-rules)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh branch-rules <BRANCH>" >&2; exit 2; }
-    "$GH_API" GET "/rules/branches/$ARG" 2>/dev/null
+    require_arg "$ARG" "usage: gh-query.sh branch-rules <BRANCH>"
+    api_call GET "/rules/branches/$ARG"
+    printf '%s\n' "$API_BODY"
+    exit "$API_RC"
+    ;;
+
+  default-branch)
+    api_call GET ""
+    render repo-default-branch
+    exit $?
+    ;;
+  pr-summary)
+    require_arg "$ARG" "usage: gh-query.sh pr-summary <NUMBER>"
+    api_call GET "/pulls/$ARG"
+    render pr-summary
+    exit $?
+    ;;
+  check-runs-summary)
+    require_arg "$ARG" "usage: gh-query.sh check-runs-summary <SHA>"
+    api_call GET "/commits/$ARG/check-runs?per_page=100"
+    render check-runs-summary
+    exit $?
+    ;;
+  required-check)
+    require_arg "$ARG" "usage: gh-query.sh required-check <SHA> [CHECK_NAME]"
+    CHECK_NAME="${3:-$DEFAULT_REQUIRED_CHECK}"
+    api_call GET "/commits/$ARG/check-runs?per_page=100"
+    render required-check "$CHECK_NAME"
+    exit $?
+    ;;
+  actions-run-summary)
+    require_arg "$ARG" "usage: gh-query.sh actions-run-summary <BRANCH>"
+    api_call GET "/actions/runs?branch=$ARG&per_page=100"
+    render actions-run-summary
+    exit $?
+    ;;
+  actions-jobs-summary)
+    require_arg "$ARG" "usage: gh-query.sh actions-jobs-summary <RUN_ID>"
+    api_call GET "/actions/runs/$ARG/jobs?per_page=100"
+    render actions-jobs-summary
+    exit $?
     ;;
   required-checks)
-    [ -n "$ARG" ] || { echo "usage: gh-query.sh required-checks <BRANCH>" >&2; exit 2; }
-    "$GH_API" GET "/rules/branches/$ARG" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-contexts = []
-for rule in data:
-    if rule.get("type") == "required_status_checks":
-        for check in rule.get("parameters", {}).get("required_status_checks", []):
-            contexts.append(check.get("context"))
-if not contexts:
-    print("no required status checks configured")
-for context in contexts:
-    print("required_status_check:", context)
-'
+    require_arg "$ARG" "usage: gh-query.sh required-checks <BRANCH>"
+    api_call GET "/rules/branches/$ARG"
+    render required-checks
+    exit $?
     ;;
-  merge)
-    PR_NUMBER="$ARG"
-    MERGE_METHOD="${3:-squash}"
-    [ -n "$PR_NUMBER" ] || { echo "usage: gh-query.sh merge <PR_NUMBER> <MERGE_METHOD>" >&2; exit 2; }
-    "$GH_API" PUT "/pulls/$PR_NUMBER/merge" "{\"merge_method\":\"$MERGE_METHOD\"}" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-print("merged:", data.get("merged"))
-print("sha:", data.get("sha"))
-print("message:", data.get("message"))
-'
-    ;;
+
   pr-create)
     PR_TITLE="${2:-}"
     PR_HEAD="${3:-}"
@@ -176,23 +184,43 @@ print("message:", data.get("message"))
       echo "usage: gh-query.sh pr-create <TITLE> <HEAD_BRANCH> <BASE_BRANCH> <BODY>" >&2
       exit 2
     fi
-    PR_PAYLOAD="$(python3 -c '
-import json, sys
-title, head, base, body = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else ""
-print(json.dumps({"title": title, "head": head, "base": base, "body": body}))
-' "$PR_TITLE" "$PR_HEAD" "$PR_BASE" "$PR_BODY")"
-    "$GH_API" POST /pulls "$PR_PAYLOAD" 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-print("number:", data.get("number"))
-print("html_url:", data.get("html_url"))
-print("state:", data.get("state"))
-head = data.get("head") or {}
-print("head_sha:", head.get("sha"))
-'
+    PR_PAYLOAD="$(python3 "$GH_EVIDENCE" --json-object title "$PR_TITLE" head "$PR_HEAD" base "$PR_BASE" body "$PR_BODY")"
+    api_call POST /pulls "$PR_PAYLOAD"
+    render pr-create-result
+    exit $?
     ;;
+
+  merge)
+    PR_NUMBER="${2:-}"
+    MERGE_METHOD="${3:-}"
+    EXPECTED_HEAD_SHA="${4:-}"
+    if [ -z "$PR_NUMBER" ] || [ -z "$MERGE_METHOD" ] || [ -z "$EXPECTED_HEAD_SHA" ]; then
+      echo "usage: gh-query.sh merge <PR_NUMBER> <MERGE_METHOD> <EXPECTED_HEAD_SHA>" >&2
+      echo "       Der erwartete Head-SHA ist Pflicht: gemergt wird ausschliesslich der" >&2
+      echo "       Stand, fuer den CI-Evidence und Review tatsaechlich vorliegen." >&2
+      exit 2
+    fi
+
+    # 1. Local precheck: is the PR still open, unmerged, and on the SHA that
+    #    was actually verified?
+    api_call GET "/pulls/$PR_NUMBER"
+    render merge-precheck "$EXPECTED_HEAD_SHA"
+    PRECHECK_RC=$?
+    if [ "$PRECHECK_RC" -ne 0 ]; then
+      echo "merge: nicht ausgefuehrt (Precheck-Exit $PRECHECK_RC)."
+      exit "$PRECHECK_RC"
+    fi
+
+    # 2. Server-side binding: GitHub refuses the merge itself if the head
+    #    moved between the precheck and now.
+    MERGE_PAYLOAD="$(python3 "$GH_EVIDENCE" --json-object merge_method "$MERGE_METHOD" sha "$EXPECTED_HEAD_SHA")"
+    api_call PUT "/pulls/$PR_NUMBER/merge" "$MERGE_PAYLOAD"
+    render merge-result
+    exit $?
+    ;;
+
   *)
     echo "ERROR: unknown subcommand '$SUBCOMMAND'" >&2
-    exit 2
+    usage
     ;;
 esac
