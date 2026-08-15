@@ -200,6 +200,37 @@ class WorktreeScriptTests(unittest.TestCase):
         source = WORKTREE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn("nichts, was durch Lockern von Berechtigungen", source)
 
+    def test_raw_git_worktree_is_not_a_required_routine_grant(self):
+        """v1 must not require permission for the mode it excludes.
+
+        The preflight's `required` list defines what a zero-approval finding run
+        legitimately needs. `Bash(git worktree *)` was in it from the time when
+        worktree parallelism was documented as available. After F-15/B it is
+        inconsistent: the supported routine never issues `git worktree` itself,
+        and create-finding-worktree.sh runs as one allowlisted call whose
+        internals need no separate grant. Because `known` is derived from
+        `required`, dropping it also turns such a grant into an UNKNOWN shell
+        allow, which the preflight reports rather than ignores.
+        """
+        preflight = (
+            REPO_ROOT / "factory" / "scripts" / "factory-preflight.sh"
+        ).read_text(encoding="utf-8")
+        # Only executable lines count. The comment that explains WHY the entry
+        # is absent necessarily contains the string itself, and matching it
+        # would make this test permanently red for the very change it guards.
+        code_lines = [
+            line
+            for line in preflight.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        offending = [line for line in code_lines if '"Bash(git worktree *)"' in line]
+        self.assertEqual(
+            offending,
+            [],
+            "Der Preflight verlangt weiterhin eine Routine-Freigabe fuer "
+            f"'git worktree' -- genau den Modus, den Factory v1 ausschliesst: {offending}",
+        )
+
     def test_script_still_refuses_a_wrong_base(self):
         """F-16/F-17 invariants must not be weakened by this change."""
         source = WORKTREE_SCRIPT.read_text(encoding="utf-8")

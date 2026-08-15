@@ -20,8 +20,11 @@ Solange nichts anderes vereinbart ist:
 - Analysiere oder repariere das Beispiel-Finding nicht technisch — es ist bewusst nur eine
   Formatvorlage.
 
-Sobald die Vorlage für ein echtes Projekt kopiert wird, kommt der Produktcode dazu (per
-Konvention unter `app/`, siehe `factory/guards/run-project-tests.py`).
+Sobald die Vorlage für ein echtes Projekt kopiert wird, kommt der Produktcode dazu — an
+beliebiger Stelle und in beliebiger Sprache. Die Factory kennt weder ein Verzeichnis noch ein
+Testframework des Produkts; sie führt aus, was [`factory/project-tests.conf`](factory/project-tests.conf)
+deklariert (siehe „Produkttests" unten). Eine frühere Fassung dieses Absatzes nannte hier die
+Konvention `app/` — die gibt es nicht mehr.
 
 ## Zuerst: einmaliges Onboarding
 

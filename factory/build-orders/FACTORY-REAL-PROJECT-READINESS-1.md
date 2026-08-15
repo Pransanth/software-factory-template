@@ -90,7 +90,42 @@ CLAUDE.md
 .claude/settings.json
 .github/workflows/factory-ci.yml
 factory/control-plane.sha256
+
+# Nachgetragen nach Review-Runde 1 (siehe unten): die Folgeänderungen, die
+# dieses Paket zwingend nach sich zieht.
+factory/scripts/create-finding-worktree.sh      (F-15: präventive Blockade)
+factory/scripts/factory-preflight.sh            (F-14/F-18/F-21: neue Pflichtdateien)
+factory/guards/test_build_order.py              (Fixture-Vervollständigung)
+factory/guards/test_closure_history.py          (Fixture-Vervollständigung)
+factory/guards/test_factory_preflight.py        (Fixture-Vervollständigung)
+factory/guards/test_run_factory_checks.py       (Fixture-Vervollständigung)
+factory/guards/test_trust_core.py               (Fixture-Vervollständigung)
+.claude/hooks/test_stop_validate_findings.py    (Fixture-Vervollständigung)
+.claude/hooks/test_subagentstop_write_review.py (Fixture-Vervollständigung)
 ```
+
+**Warum diese neun Pfade nachgetragen wurden — Review-Runde 1, Befund (1).** Der unabhängige
+Reviewer hat beanstandet, dass die Liste sich als „abschließend" bezeichnete, während neun
+tatsächlich geänderte Control-Plane-Dateien fehlten. Der Einwand ist berechtigt und war intern
+widersprüchlich: `factory/scripts/create-finding-worktree.sh` ist das zentrale Artefakt von F-15,
+dessen Änderung Schritt 4 der „Verbindlichen Reihenfolge" **dieses Dokuments** verlangt und deren
+Ausgabe in beiden Evidence-Abschnitten wörtlich zitiert wird. Ein Reviewer hält den Diff gegen
+diese Liste; ist sie unvollständig, prüft er gegen eine Fiktion.
+
+Inhaltlich sind alle neun Folgeänderungen dieses Pakets und ausschließlich verstärkend:
+
+- `create-finding-worktree.sh` — die präventive `SANDBOX_WORKTREE_INCOMPATIBLE`-Blockade (F-15).
+- `factory-preflight.sh` — `finding_format.py`, `project_tests.py` und `project-tests.conf` als
+  Pflichtdateien; ohne sie ist die Factory nicht funktionsfähig, und F-14 verlangt, dass genau das
+  geprüft wird.
+- Die sieben Testdateien — Fixture-Listen um die neuen Module ergänzt und, wo ein Fixture
+  Produktcode anlegt, um eine `project-tests.conf`. Keine Assertion wurde gelockert, kein Testfall
+  entfernt, keine Prüfung deaktiviert.
+
+Alles andere bleibt out of scope. `factory/reviews/**` wird nicht angefasst — Review-Runden sind
+append-only und entstehen ausschließlich durch den `SubagentStop`-Hook. Die bereits geschlossenen
+Findings `FACTORY-TRUST-CORE-1` und `FACTORY-OPS-ROBUSTNESS-1` und ihre Bauaufträge werden nicht
+verändert; sie dienen als Regressionskorpus.
 
 Alles andere ist out of scope. `factory/reviews/**` wird nicht angefasst — Review-Runden sind
 append-only und entstehen ausschließlich durch den `SubagentStop`-Hook. Die bereits geschlossenen
