@@ -260,6 +260,62 @@ aus sich selbst heraus herstellen. Was der Guard ändert, ist die Sichtbarkeit: 
 Nebenwirkung wird ein Manifest-Diff, den ein Review nicht übersehen kann, plus die ausdrückliche
 Erklärung, dass die Kontrollebene geändert werden sollte.
 
+## Das Finding-Format: ein kanonischer Metadatenblock (Audit-Befund F-18)
+
+Ein Finding hat genau **einen** Ort für Lifecycle-Metadaten: den Bereich zwischen der Titelzeile
+und der ersten Abschnittsüberschrift.
+
+```
+# <FINDING-ID>                <- Titelzeile
+
+Status: <STATUS>              <- kanonischer Metadatenblock:
+Severity: <P0|P1|P2|P3>          Status und Severity werden AUSSCHLIESSLICH
+                                 hier gelesen.
+## Befund
+
+...Prosa, zitierte Logs, Tickets, Konfiguration — beliebiger Text...
+
+## Analyse
+
+Root Cause: erste Zeile
+  Fortsetzungszeilen sind eingerückt und gehören zum selben Feld.
+Affected Components: ...
+```
+
+Vier mechanische Regeln, umgesetzt in
+[`factory/guards/finding_format.py`](../../factory/guards/finding_format.py):
+
+1. `Status` und `Severity` werden nur im kanonischen Block gelesen. Eine `Status:`-Zeile
+   anderswo ist Fließtext und wird ignoriert — auch im Analyse-Abschnitt.
+2. Analysefelder werden nur innerhalb von `## Analyse` gelesen.
+3. Ein Feldwert setzt sich über folgende **eingerückte** Zeilen fort. Die Einrückung ist das
+   einzige Fortsetzungsmerkmal, also gibt es kein Raten, wo ein Wert endet. Die Platzhalterprüfung
+   sieht den **vollständigen** Wert, nicht nur dessen erste Zeile.
+4. Fenced Code Blocks (``` oder ~~~) werden überall übersprungen. Ein zitiertes Log kann deshalb
+   nirgends ein Feld einführen.
+
+**Warum das eine technische Regel sein muss.** Vorher scannte der Parser das gesamte Dokument nach
+`Status:` und `Severity:`, erster Treffer gewinnt. Ein reales Finding zitiert aber Logs und
+Tickets — Text, der genau diese Wörter enthält. Beobachtet gegen den unveränderten Guard, mit
+einem Ticketauszug oberhalb der kanonischen Felder:
+
+```
+geparster Status:   'OPEN'        (kanonisches Feld sagte IMPLEMENTING)
+geparste Severity:  'P1'          (kanonisches Feld sagte P0)
+P0-Hard-Stop ausgeloest: False
+```
+
+Der P0-Hard-Stop aus F-09, die Bauauftragspflicht aus F-10 und das gesamte Closure-Gate hängen
+alle an diesem einen geparsten Status. Eine bereits geschlossene Invariante hing damit an einer
+Textreihenfolge.
+
+Es gibt genau **einen** Parser: `validate-finding.py` und `validate-build-order.py` lesen beide
+über `finding_format.parse_finding`. Ein zweiter, leicht abweichender Parser wäre genau die Art
+stiller Divergenz, die dieser Befund beseitigt.
+
+Bestehende Findings bleiben gültig — sie haben dieses Layout bereits. Was nicht mehr akzeptiert
+wird, sind Metadaten **außerhalb** des kanonischen Blocks; das ist der Zweck der Reparatur.
+
 ## Platzhalter, die nicht als "ausgefüllt" zählen
 
 Der Guard erkennt u. a. folgende Werte als ungültige Platzhalter (unabhängig von Groß-/

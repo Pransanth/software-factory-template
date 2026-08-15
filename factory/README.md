@@ -79,8 +79,10 @@ niemand dupliziert Prüflogik.
 ## Was ist der Projekt-Test-Runner?
 
 [`factory/guards/run-project-tests.py`](guards/run-project-tests.py) ist der kanonische
-Einstiegspunkt für die Tests des **Produktcodes** (per Konvention `app/**/test_*.py`,
-umstellbar mit `--project-dir`). Er ist **bewusst nicht** in `run-factory-checks.py` eingehängt
+Einstiegspunkt für die Tests des **Produktcodes**. Er kennt das Testframework des Projekts nicht
+und sucht keine Testdateien: er führt aus, was [`factory/project-tests.conf`](project-tests.conf)
+deklariert (Audit-Befund F-21). Die frühere Option `--project-dir` und die Annahme
+`app/**/test_*.py` sind ersatzlos entfallen. Er ist **bewusst nicht** in `run-factory-checks.py` eingehängt
 und läuft deshalb **nicht** über den lokalen Stop-Hook, sondern ausschließlich in GitHub CI:
 Während `IMPLEMENTING` ist ein rotes Regressionstest-Ergebnis vor dem Fix ein normaler,
 gewollter Zwischenzustand — würde der Stop-Hook bei jedem Sitzungsende alle Projekttests
@@ -130,8 +132,15 @@ implementierenden Agenten zu verlassen.
 
 ## Skripte: Worktrees, GitHub, Onboarding
 
+- [`factory/project-tests.conf`](project-tests.conf) — die Produkttests dieses Repositories. Die
+  Factory kennt das Testframework des Projekts nicht; sie führt genau die hier deklarierten
+  Kommandos aus, ohne Shell (Audit-Befund F-21). Control Plane: eine Änderung ist ein
+  `FACTORY_CHANGE`.
 - [`factory/scripts/create-finding-worktree.sh`](scripts/create-finding-worktree.sh) — legt einen
-  Finding-Worktree deterministisch auf dem aktuellen Stand von `origin/<default-branch>` an
+  Finding-Worktree deterministisch auf dem aktuellen Stand von `origin/<default-branch>` an.
+  **Hinweis:** Bei aktiver Factory-Sandbox lässt sich kein Worktree anlegen (Audit-Befund F-15);
+  Factory v1 ist bewusst sequentiell. Das Skript meldet diesen Fall als
+  `SANDBOX_WORKTREE_INCOMPATIBLE` mit Exit 4
   (`--no-track`, HEAD-Verifikation gegen den erwarteten SHA, sonst `AUTONOMY_BLOCKER`).
 - [`factory/scripts/gh-api.sh`](scripts/gh-api.sh) — minimaler GitHub-REST-Zugriff über den
   git-credential-Helper. **`gh` wird nicht vorausgesetzt.** Der Repository-Slug wird aus allen

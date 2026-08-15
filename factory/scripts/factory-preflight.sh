@@ -180,6 +180,13 @@ REQUIRED_FILES=(
   "factory/guards/gh_evidence.py"
   "factory/guards/finding_state.py"
   "factory/guards/run-project-tests.py"
+  # Audit-Befund F-18: der einzige Finding-Parser. Ohne ihn ist kein Guard
+  # lauffaehig, der einen Status liest.
+  "factory/guards/finding_format.py"
+  # Audit-Befund F-21: der Produkttest-Adapter und seine Konfiguration. Ohne
+  # sie ist nicht bestimmbar, welche Produkttests als Verification gelten.
+  "factory/guards/project_tests.py"
+  "factory/project-tests.conf"
   "factory/control-plane.sha256"
   "factory/scripts/gh-api.sh"
   "factory/scripts/gh-query.sh"
@@ -367,7 +374,13 @@ required = [
     "Bash(git fetch origin *)",
     "Bash(git push origin *)",
     "Bash(git switch *)",
-    "Bash(git worktree *)",
+    # Deliberately NOT here: "Bash(git worktree *)". Audit finding F-15 resolved
+    # to B -- Factory v1 is sequential and does not support worktree-based
+    # parallelism. Requiring a grant for exactly the mode v1 excludes would be
+    # inconsistent: the supported routine never issues `git worktree` itself,
+    # and create-finding-worktree.sh runs as a single allowlisted call whose
+    # internals need no separate permission. Removing it from `required` also
+    # makes such a grant an UNKNOWN shell allow, which the check below reports.
     "Bash(factory/scripts/gh-api.sh *)",
     "Bash(factory/scripts/gh-query.sh *)",
     "Bash(factory/scripts/create-finding-worktree.sh *)",

@@ -70,6 +70,13 @@ CONTROL_PLANE_DIR_RULES = (
 CONTROL_PLANE_FILES = (
     ".claude/settings.json",
     "CLAUDE.md",
+    # Audit finding F-21: this file decides which product tests count as valid
+    # verification. Whoever can change it during ordinary finding work could
+    # make a red product suite disappear without touching a single test file,
+    # so it is stamped like any other control-plane file and changing it is a
+    # FACTORY_CHANGE -- done once when the factory is integrated into a real
+    # project.
+    "factory/project-tests.conf",
 )
 
 # factory/guards/validate-control-plane.py -> parents[2] = repo root

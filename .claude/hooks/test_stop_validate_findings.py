@@ -40,6 +40,13 @@ GUARD_FILES = (
     "validate-build-order.py",
     "validate-control-plane.py",
     "scope_hash.py",
+    # Audit-Befund F-18: validate-finding.py und validate-build-order.py lesen
+    # Findings ausschliesslich ueber diesen einen Parser. Fehlt er in einem
+    # Wegwerf-Repository, scheitert jeder Guard-Aufruf mit ModuleNotFoundError.
+    "finding_format.py",
+    # Audit-Befund F-21: der kanonische Runner prueft ueber dieses Modul, ob
+    # bestimmt ist, welche Produkttests als Verification gelten.
+    "project_tests.py",
 )
 
 GIT_ENV_OVERRIDES = {

@@ -44,6 +44,10 @@ GUARD_FILES = (
     "validate-finding.py",
     "validate-build-order.py",
     "scope_hash.py",
+    # Audit-Befund F-18: validate-finding.py und validate-build-order.py lesen
+    # Findings ausschliesslich ueber diesen einen Parser. Fehlt er in einem
+    # Wegwerf-Repository, scheitert jeder Guard-Aufruf mit ModuleNotFoundError.
+    "finding_format.py",
 )
 
 # From IMPLEMENTING onwards a finding needs its own valid build order (audit

@@ -90,6 +90,7 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from finding_format import parse_finding  # noqa: E402,F401
 from scope_hash import (  # noqa: E402
     ScopeHashError,
     compute_scope_hash,
@@ -184,10 +185,10 @@ PLACEHOLDER_VALUES = {
     "n/a",
 }
 
-STATUS_LINE_RE = re.compile(r"^Status:\s*(.*)$", re.IGNORECASE)
-SEVERITY_LINE_RE = re.compile(r"^Severity:\s*(.*)$", re.IGNORECASE)
-ANALYSE_HEADING_RE = re.compile(r"^##\s*Analyse\s*$", re.IGNORECASE)
-FIELD_LINE_RE = re.compile(r"^([A-Za-z][A-Za-z ]*?):\s*(.*)$")
+# The finding-side regexes that used to live here now live in
+# finding_format.py, which is the only parser for findings (F-18). The ones
+# below read REVIEW artifacts, a different and much stricter file format that
+# the SubagentStop hook writes -- they stay here.
 REVIEW_RESULT_LINE_RE = re.compile(r"^Result:\s*(.*)$")
 REVIEW_FINDING_LINE_RE = re.compile(r"^Finding:\s*(.*)$")
 REVIEW_SCOPE_HASH_LINE_RE = re.compile(r"^Reviewed Scope Hash:\s*(.*)$")
@@ -202,43 +203,12 @@ REVIEW_GUARD = Path(__file__).resolve().parent / "validate-review.py"
 BUILD_ORDER_GUARD = Path(__file__).resolve().parent / "validate-build-order.py"
 
 
-def parse_finding(text):
-    """Parse a finding's raw text into {"status", "severity", "fields"}."""
-    status = None
-    severity = None
-    fields = {}
-    in_analyse_section = False
-
-    for raw_line in text.splitlines():
-        line = raw_line.rstrip()
-        stripped = line.strip()
-
-        if status is None:
-            match = STATUS_LINE_RE.match(stripped)
-            if match:
-                status = match.group(1).strip()
-                continue
-
-        if severity is None:
-            match = SEVERITY_LINE_RE.match(stripped)
-            if match:
-                severity = match.group(1).strip()
-                continue
-
-        if ANALYSE_HEADING_RE.match(stripped):
-            in_analyse_section = True
-            continue
-
-        if in_analyse_section:
-            if stripped.startswith("##"):
-                in_analyse_section = False
-                continue
-            match = FIELD_LINE_RE.match(stripped)
-            if match:
-                name, value = match.group(1).strip(), match.group(2).strip()
-                fields[name] = value
-
-    return {"status": status, "severity": severity, "fields": fields}
+# parse_finding is imported from finding_format above (audit finding F-18).
+# It used to live here and scanned the whole document for `Status:` /
+# `Severity:`, first match wins -- so a quoted ticket or log could set a
+# finding's lifecycle metadata, and a P0 could be read as a P1. There must be
+# exactly one parser for findings; see finding_format.py for the format and the
+# observed failure it closes.
 
 
 def validate_finding(parsed, finding_path):
@@ -357,17 +327,39 @@ def _check_severity(status, severity):
 
 
 def _check_required_fields(fields, required_fields):
+    """Every required field must be present and carry real content.
+
+    Field values may be multi-line (audit finding F-18), so the check looks at
+    the WHOLE value, not just its first line. A field whose first line reads
+    like content but whose continuation is a bare `TBD` is exactly the
+    half-finished state this is meant to catch -- before the repair, the parser
+    truncated the value at the line break and such a field passed.
+    """
     errors = []
     for field_name in required_fields:
         value = fields.get(field_name)
         if value is None:
             errors.append(f"Pflichtfeld fehlt: '{field_name}'.")
             continue
+
         if value.strip().lower() in PLACEHOLDER_VALUES:
             errors.append(
                 f"Pflichtfeld '{field_name}' ist leer oder ein Platzhalter "
                 f"('{value}')."
             )
+            continue
+
+        for number, line in enumerate(value.splitlines(), start=1):
+            if not line.strip():
+                continue
+            if line.strip().lower() in PLACEHOLDER_VALUES:
+                errors.append(
+                    f"Pflichtfeld '{field_name}' enthaelt in Zeile {number} den "
+                    f"Platzhalter '{line.strip()}'. Ein mehrzeiliges Pflichtfeld "
+                    "gilt nur als ausgefuellt, wenn keine seiner Zeilen ein "
+                    "Platzhalter ist."
+                )
+                break
     return errors
 
 

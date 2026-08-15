@@ -45,6 +45,13 @@ GUARD_FILES = (
     "run-factory-checks.py",
     "validate-control-plane.py",
     "scope_hash.py",
+    # Audit-Befund F-18: validate-finding.py und validate-build-order.py lesen
+    # Findings ausschliesslich ueber diesen einen Parser. Fehlt er in einem
+    # Wegwerf-Repository, scheitert jeder Guard-Aufruf mit ModuleNotFoundError.
+    "finding_format.py",
+    # Audit-Befund F-21: der kanonische Runner prueft ueber dieses Modul, ob
+    # bestimmt ist, welche Produkttests als Verification gelten.
+    "project_tests.py",
 )
 
 GIT_ENV_OVERRIDES = {
@@ -147,6 +154,11 @@ class BuildOrderTestCase(unittest.TestCase):
                 shutil.copy2(source, self.guards_dir / name)
 
         (self.root / "app" / "code.py").write_text("VALUE = 1\n", encoding="utf-8")
+        # Product code present -> audit finding F-21 requires a test
+        # configuration, otherwise the canonical runner correctly blocks.
+        (self.root / "factory" / "project-tests.conf").write_text(
+            "mode: real-project\n\n[suite: unit]\ncommand: true\n", encoding="utf-8"
+        )
 
         _git(self.root, "init", "--initial-branch=trunk")
         _git(self.root, "add", "-A")
