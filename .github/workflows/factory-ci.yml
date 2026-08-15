@@ -3,12 +3,18 @@ name: Factory CI
 # Runs the exact same canonical factory checks used locally and by the
 # Claude Code Stop hook (see factory/README.md), independently of any
 # Claude session. No Claude/Anthropic API, no secrets, no deployments.
+#
+# Deliberately no branch filter: this workflow is part of a transferable
+# template and must not assume the default branch is called "main". Every
+# push and every pull request is checked, whatever the branches are named.
+#
+# The job id below (factory-checks) is the name to configure as the
+# Required Status Check on the protected default branch -- see
+# factory/ONBOARDING.md. Without that, CI checks but blocks no merge.
 
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
 
 permissions:
   contents: read
@@ -31,8 +37,14 @@ jobs:
       - name: Run canonical factory checks
         run: python3 factory/guards/run-factory-checks.py
 
+      - name: Run project test suite
+        run: python3 factory/guards/run-project-tests.py
+
       - name: Run factory guard tests
-        run: python3 -m unittest factory.guards.test_validate_finding factory.guards.test_run_factory_checks -v
+        run: python3 -m unittest factory.guards.test_validate_finding factory.guards.test_validate_review factory.guards.test_run_factory_checks factory.guards.test_create_finding_worktree factory.guards.test_factory_preflight -v
 
       - name: Run Stop hook tests
         run: python3 .claude/hooks/test_stop_validate_findings.py -v
+
+      - name: Run SubagentStop review hook tests
+        run: python3 .claude/hooks/test_subagentstop_write_review.py -v

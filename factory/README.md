@@ -2,43 +2,121 @@
 
 Diese Datei erklärt in einfachen Worten, was die Bausteine in diesem Verzeichnis tun und wie sie
 zusammenhängen. Für die genauen Zustandsregeln siehe
-[`.claude/rules/factory-workflow.md`](../.claude/rules/factory-workflow.md).
+[`.claude/rules/factory-workflow.md`](../.claude/rules/factory-workflow.md), für die einmalige
+Einrichtung eines neuen Projekts [`factory/ONBOARDING.md`](ONBOARDING.md).
 
 ## Was ist ein Finding?
 
-Ein Finding ist eine einzelne Markdown-Datei unter `factory/findings/`, z. B.
-[`P1-DEMO-1.md`](findings/P1-DEMO-1.md). Sie beschreibt einen Befund (aktuell nur
-Sicherheitsbefunde) und trägt einen Status (`OPEN`, `ANALYZED`, ... siehe Workflow-Regeln). Je
-nach Status müssen bestimmte Analysefelder ausgefüllt sein.
+Ein Finding ist eine einzelne Markdown-Datei unter `factory/findings/`. Sie beschreibt einen
+Befund (aktuell nur Sicherheitsbefunde) und trägt einen Status (`OPEN`, `ANALYZED`, ... siehe
+Workflow-Regeln). Je nach Status müssen bestimmte Analysefelder ausgefüllt sein.
 
 ## Was ist ein Validator?
 
-Ein Validator ist ein kleines, deterministisches Skript, das eine einzelne Finding-Datei gegen
-die Regeln für ihren Status prüft — ohne KI, ohne Netzwerk, rein regelbasiert. Der aktuelle
-Validator ist [`factory/guards/validate-finding.py`](guards/validate-finding.py):
+Ein Validator ist ein kleines, deterministisches Skript, das eine einzelne Datei gegen die Regeln
+für ihren Status prüft — ohne KI, ohne Netzwerk, rein regelbasiert:
 
-```
-python3 factory/guards/validate-finding.py factory/findings/P1-DEMO-1.md
-```
+- [`factory/guards/validate-finding.py`](guards/validate-finding.py) prüft ein Finding:
+  ```
+  python3 factory/guards/validate-finding.py factory/findings/<ID>.md
+  ```
+- [`factory/guards/validate-review.py`](guards/validate-review.py) prüft ein Review-Artefakt:
+  ```
+  python3 factory/guards/validate-review.py factory/reviews/<ID>.md
+  ```
 
-Exit 0 = das Finding ist für seinen Status gültig, Exit 1 = ungültig (mit Fehlerliste). Er prüft
-genau eine Datei und weiß nichts von anderen Findings oder davon, wer ihn aufruft.
+Exit 0 = gültig, Exit 1 = ungültig (mit Fehlerliste). Jeder Validator prüft genau eine Datei und
+weiß nichts davon, wer ihn aufruft.
 
 ## Was ist der gemeinsame Factory-Runner?
 
 [`factory/guards/run-factory-checks.py`](guards/run-factory-checks.py) ist der **eine
-kanonische Einstiegspunkt** für "sind alle Factory-Prüfungen aktuell grün?". Er findet alle
-Finding-Dateien unter `factory/findings/`, lässt jede einzelne vom Validator prüfen, und liefert
-ein Gesamtergebnis:
+kanonische Einstiegspunkt** für "sind alle Factory-Prüfungen aktuell grün?":
 
 ```
 python3 factory/guards/run-factory-checks.py
 ```
 
 Exit 0 = alle Checks bestanden, Exit 1 = mindestens einer fehlgeschlagen — mit einer klaren
-Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Heute gibt es nur eine Art Check
-(Finding-Validierung); künftige Checks würden ebenfalls von hier aus laufen, statt an mehreren
-Stellen eigene Prüflogik zu duplizieren.
+Auflistung, welcher Check bei welcher Datei fehlgeschlagen ist. Er führt zwei Arten von Check aus,
+beide ohne KI, ohne Netzwerk, rein regelbasiert:
+
+1. **Finding-Validierung**: jede Datei unter `factory/findings/` gegen
+   [`validate-finding.py`](guards/validate-finding.py). Für ein Finding, das `READY_FOR_CLOSURE`
+   oder `CLOSED` erreichen will, prüft dieser Schritt zusätzlich strukturell, dass das
+   referenzierte Review-Artefakt existiert und `Result: PASS` enthält (siehe "Verification Skill
+   und unabhängiger Reviewer" weiter unten).
+2. **Review-Guard**: jede Datei unter `factory/reviews/` (außer `README.md`) gegen
+   [`validate-review.py`](guards/validate-review.py) — prüft nur die Struktur eines
+   Review-Artefakts (alle Felder ausgefüllt, `Result` ein gültiger Wert, Reviewer-Provenienz
+   korrekt), nicht dessen inhaltliche Richtigkeit.
+
+**Projektspezifische Guards** (z. B. ein AST-Guard, der eine bestimmte Laufzeit-Sicherheitsgrenze
+der Anwendung erzwingt) gehören ausdrücklich **nicht** in diese Vorlage, sondern in das jeweilige
+Projekt. Der vorgesehene Erweiterungspunkt ist eine weitere `run_*_checks()`-Funktion im Runner
+plus ein eigener `validate-*.py`-Guard — so bleibt es bei **einem** Befehl für alle Aufrufer und
+niemand dupliziert Prüflogik.
+
+## Was ist der Projekt-Test-Runner?
+
+[`factory/guards/run-project-tests.py`](guards/run-project-tests.py) ist der kanonische
+Einstiegspunkt für die Tests des **Produktcodes** (per Konvention `app/**/test_*.py`,
+umstellbar mit `--project-dir`). Er ist **bewusst nicht** in `run-factory-checks.py` eingehängt
+und läuft deshalb **nicht** über den lokalen Stop-Hook, sondern ausschließlich in GitHub CI:
+Während `IMPLEMENTING` ist ein rotes Regressionstest-Ergebnis vor dem Fix ein normaler,
+gewollter Zwischenzustand — würde der Stop-Hook bei jedem Sitzungsende alle Projekttests
+verlangen, würde er genau diesen gewollten Zwischenzustand blockieren. CI dagegen läuft bei
+Push/PR, also wenn eine Änderung als fertig gilt.
+
+In einer frischen Kopie der Vorlage gibt es noch keinen Produktcode; der Runner meldet das und
+endet mit Exit 0.
+
+## Verification Skill und unabhängiger Reviewer
+
+Der Weg von `IMPLEMENTING` über `VERIFYING`, externe CI, ein unabhängiges Review,
+`READY_FOR_CLOSURE`, `CLOSED` bis zum Merge ist standardisiert und wiederverwendbar, nicht an
+einen einmaligen Chat-Prompt gebunden:
+
+- **[`.claude/skills/verify-finding/SKILL.md`](../.claude/skills/verify-finding/SKILL.md)**
+  beschreibt den Ablauf: lokale Evidence einsammeln (Regressionstest, relevante Tests, Guard,
+  kanonischer Runner, Projekttests), pushen, PR erstellen, echten CI-Lauf abwarten, unabhängiges
+  Review anstoßen, Artefakt prüfen, je nach Ergebnis weiter zu `READY_FOR_CLOSURE`/`CLOSED` und
+  Merge, zu `EXPERT_REVIEW_REQUIRED`, oder stoppen. Der Skill trifft selbst keine
+  Sicherheitsentscheidung — er prüft vorhandene Evidence systematisch und delegiert die
+  eigentliche Bewertung an den Reviewer.
+- **[`.claude/agents/finding-closure-reviewer.md`](../.claude/agents/finding-closure-reviewer.md)**
+  ist ein eigenständiger, **rein lesender** Subagent (Tools: nur `Read`, `Grep`, `Glob` — kein
+  `Edit`, `Write`, `Bash`). Er läuft in einem getrennten Kontext ohne Erinnerung an die
+  implementierende Session und liefert genau eines: `PASS`, `FAIL` oder
+  `EXPERT_REVIEW_REQUIRED`, mit Begründung und Fundstellen. Der implementierende Agent darf
+  dieses Ergebnis nicht nachträglich überschreiben.
+- **[`factory/reviews/`](reviews/README.md)** ist der Ort für Review-Artefakte
+  (`factory/reviews/<Finding-ID>.md`). Sie entstehen **ausschließlich** über den
+  `SubagentStop`-Hook aus den echten Ereignisdaten des Reviewer-Laufs (Provenienz-Felder
+  `Reviewer Agent Type` / `Reviewer Agent ID`) und werden strukturell von `validate-review.py`
+  geprüft.
+
+**Implementierender Agent vs. unabhängiger Reviewer:** Der implementierende Agent (der die
+Reparatur baut und den `verify-finding`-Skill ausführt) hat vollen Werkzeugzugriff, kennt die
+gesamte Implementierungshistorie und hat naturgemäß ein Interesse daran, dass sein eigener Fix
+funktioniert. Der Reviewer ist bewusst das Gegenteil: werkzeugbeschränkt (rein lesend), ohne
+Gedächtnis der Implementierung, ausschließlich mit dem beauftragt, kritisch zu prüfen, ob die
+Behauptungen tatsächlich stimmen. Diese Trennung ist der Grund, warum Closure-Gates ein
+`Result: PASS` aus einem echten, separaten Review verlangen, statt sich auf die Selbstauskunft des
+implementierenden Agenten zu verlassen.
+
+## Skripte: Worktrees, GitHub, Onboarding
+
+- [`factory/scripts/create-finding-worktree.sh`](scripts/create-finding-worktree.sh) — legt einen
+  Finding-Worktree deterministisch auf dem aktuellen Stand von `origin/<default-branch>` an
+  (`--no-track`, HEAD-Verifikation gegen den erwarteten SHA, sonst `AUTONOMY_BLOCKER`).
+- [`factory/scripts/gh-api.sh`](scripts/gh-api.sh) — minimaler GitHub-REST-Zugriff über den
+  git-credential-Helper. **`gh` wird nicht vorausgesetzt.**
+- [`factory/scripts/gh-query.sh`](scripts/gh-query.sh) — feste, eng gefasste Unterbefehle für
+  PR-, Check-, Actions-, Ruleset- und Merge-Routine, jeweils mit `key: value`-Ausgabe, damit
+  keine ad-hoc-Pipeline und keine Zwischen-JSON-Datei nötig ist.
+- [`factory/scripts/factory-preflight.sh`](scripts/factory-preflight.sh) — der Onboarding-Check
+  für ein neues Projekt, siehe [`factory/ONBOARDING.md`](ONBOARDING.md).
 
 ## Was macht der Stop-Hook?
 
@@ -57,28 +135,36 @@ Insbesondere:
 
 - Er läuft nur, wenn Claude Code selbst versucht zu stoppen — er prüft nichts, wenn Dateien auf
   anderem Weg geändert werden (manuell, durch ein anderes Tool, durch ein Skript).
-- Er behandelt einen wiederholten Stopp-Versuch (`stop_hook_active: true`) **nicht** als Beweis,
-  dass ein Finding jetzt gültig ist — er prüft bei jedem einzelnen Versuch erneut den echten
-  Zustand und blockiert konsequent weiter, solange etwas tatsächlich ungültig ist.
-  Genau deshalb ist er **kein** eigenständiger Schutz vor einer Endlosschleife: Diese
-  Garantie liefert Claude Code selbst, nicht dieses Skript. Laut offizieller Dokumentation
-  überschreibt Claude Code einen Stop-Hook, nachdem er ohne erkennbaren Fortschritt acht Mal in
-  Folge blockiert hat, beendet den Turn trotzdem und zeigt dabei eine Warnung, dass der Stop-Hook
-  zu oft in Folge blockiert hat. Dieser Cap ist über die Umgebungsvariable
-  `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` konfigurierbar. Das ist die eigentliche technische Grenze:
-  Nach genügend Versuchen kann ein weiterhin ungültiger Zustand den Stopp trotzdem nicht mehr
-  verhindern — der Stop-Hook allein kann einen ungültigen Zustand also **nicht absolut**
-  ausschließen.
-- Er läuft mit den Rechten des lokalen Nutzers und lässt sich durch Konfiguration umgehen oder
-  deaktivieren (z. B. Hooks überspringen, Einstellungen ändern). Ein Nutzer mit
-  Schreibzugriff auf `.claude/settings.json` kann ihn jederzeit abschalten.
-- Er prüft nur formale Vollständigkeit der Finding-Felder, nicht deren inhaltliche Richtigkeit.
+- Ein erster, ungültiger Stop-Versuch wird blockiert, mit der konkreten Ursache. Ein
+  **wiederholter** Versuch (`stop_hook_active: true`) wird dagegen bewusst **nicht** erneut
+  geprüft und **nicht** erneut blockiert — er lässt Claude sofort weiterlaufen, unabhängig davon,
+  ob der Zustand inzwischen tatsächlich gültig ist. Das ist eine bewusste Verhaltensänderung:
+  Eine frühere Version dieses Hooks prüfte bei jedem Versuch erneut und verließ sich auf Claude
+  Codes eigenen, dokumentierten Block-Cap (nominell 8 aufeinanderfolgende Blockierungen ohne
+  Fortschritt, konfigurierbar über `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP`), um eine echte
+  Endlosschleife zu verhindern. In der Praxis griff dieser Cap nicht zuverlässig — eine Sitzung
+  blieb über viele Wiederholungen hinweg blockiert hängen, ohne lokale Möglichkeit, das anders als
+  durch manuelles Eingreifen außerhalb der Session zu beheben. Sich auf einen Plattform-Cap zu
+  verlassen, der nicht zuverlässig greift, ist keine echte Schleifensicherheit. Dieser Hook
+  liefert deshalb seine eigene, einfache Garantie: höchstens eine Blockierung pro Aufgabe.
 
-Ein wirklich verlässliches Gate — z. B. bevor Code in einen geschützten Branch gelangt — braucht
-eine serverseitige Prüfung (CI), die nicht vom lokalen Rechner oder von Claude Code selbst
-abhängt. Diese Schicht gibt es jetzt: siehe "Die Prüfkette: lokal bis CI" weiter unten. (Ein
-Branch-Schutz, der einen fehlgeschlagenen CI-Lauf tatsächlich verbindlich macht, ist noch nicht
-konfiguriert — CI prüft aktuell, blockiert aber noch keinen Merge.)
+  Das bedeutet auch: Ein zweiter Stop-Versuch kommt immer durch, selbst wenn der Zustand
+  tatsächlich weiterhin ungültig ist. Das schwächt **keine** der eigentlichen Prüfregeln —
+  `validate-finding.py`, `validate-review.py` und `run-factory-checks.py` selbst bleiben
+  unverändert scharf. Es ändert nur, ob *dieser lokale Hook* einen zweiten Versuch aufhält. Ob ein
+  Finding wirklich abschließbar ist, entscheiden weiterhin ausschließlich die deterministischen
+  Guards und, verbindlich, GitHub CI.
+- Er läuft mit den Rechten des lokalen Nutzers und lässt sich durch Konfiguration umgehen oder
+  deaktivieren. Ein Nutzer mit Schreibzugriff auf `.claude/settings.json` kann ihn jederzeit
+  abschalten.
+- Er prüft nur formale Vollständigkeit der Felder, nicht deren inhaltliche Richtigkeit.
+
+Ein wirklich verlässliches Gate — bevor Code in den geschützten Default-Branch gelangt — braucht
+eine serverseitige Prüfung (CI), die nicht vom lokalen Rechner, von Claude Code oder von diesem
+Hook abhängt. Genau das ist GitHub CI (`.github/workflows/factory-ci.yml`) **zusammen mit einem
+Required Status Check auf dem geschützten Default-Branch** — siehe
+[`factory/ONBOARDING.md`](ONBOARDING.md), Schritt 3. Ohne diesen Required Status Check prüft CI
+zwar, blockiert aber keinen Merge.
 
 ## Shared vs. local Claude settings
 
@@ -86,43 +172,48 @@ Dieses Repo hat zwei getrennte Claude-Code-Einstellungsdateien mit bewusst unter
 Zweck:
 
 - **`.claude/settings.json`** ist die **übertragbare, versionierte Factory-Konfiguration**. Sie
-  gehört zur Vorlage selbst: der Stop-Hook und generische Demo-Schutzregeln (aktuell
-  `Bash(docker *)`, `Bash(git push *)`, `Bash(gh *)` verboten), die für jede Kopie dieses Repos
-  gleichermaßen sinnvoll sind. Diese Datei wird committet.
+  gehört zur Vorlage selbst: Stop- und SubagentStop-Hook, der OS-Sandbox-Schutz sowie explizite
+  `Edit`/`Write`-Sperren auf `factory/reviews/`, `.claude/hooks/`, `.claude/skills/`,
+  `.claude/agents/` und die Settings-Dateien selbst (Verteidigung in der Tiefe) — Regeln, die für
+  jede Kopie dieses Repos gleichermaßen sinnvoll sind. `git push` und GitHub-Zugriff sind hier
+  bewusst **nicht** pauschal verboten: ein normaler, bereits durch die Factory-Regeln
+  autorisierter Finding-Workflow (Fix → Verifikation → CI → Review → Closure → PR/Merge) muss
+  unbeaufsichtigt laufen können. Diese Datei wird committet.
 - **`.claude/settings.local.json`** ist **persönlich/maschinenspezifisch** und **niemals Teil der
-  Factory-Vorlage**. Hier stehen Regeln, die nur auf dem konkreten Rechner der jeweiligen Person
-  Sinn ergeben — zum Beispiel absolute Pfade zu anderen, lokalen Projekten auf derselben
-  Maschine (in diesem Fall: die Isolation gegenüber einem anderen lokalen Projekt namens
-  ein anderes lokales Projekt). Diese Datei wird **nicht** committet (siehe `.gitignore`).
+  Factory-Vorlage**. Hier stehen die konkreten Allows dieser Maschine, inklusive absoluter Pfade
+  (z. B. der read-only `Read(<repo>/**)`-Zugriff des Reviewers). Diese Datei wird **nicht**
+  committet (siehe `.gitignore`) und wird von der Factory auch nicht selbst geschrieben — den
+  passenden Block gibt `factory/scripts/factory-preflight.sh` aus, einsetzen muss ihn ein Mensch.
 
 Faustregel: **Absolute Pfade zu irgendetwas außerhalb dieses Repos gehören ausschließlich in
-`settings.local.json`.** Wird dieses Repo als Vorlage für ein echtes Projekt kopiert, kann
-`settings.json` unverändert mitgenommen werden — `settings.local.json` dagegen ist per Definition
-für jede Maschine neu und individuell einzurichten (oder wegzulassen).
+`settings.local.json`.**
 
 ## Die Prüfkette: lokal bis CI
 
-Es gibt vier Schichten, aber nur **eine** Prüflogik — jede Schicht ruft nur die davor auf,
-niemand implementiert die Regeln ein zweites Mal:
+Es gibt vier Schichten, aber nur **eine** Prüflogik pro Check-Art — jede Schicht ruft nur die
+davor auf, niemand implementiert die Regeln ein zweites Mal:
 
 ```
-lokaler Validator            factory/guards/validate-finding.py     (prueft 1 Finding)
+lokale Validatoren           factory/guards/validate-finding.py, validate-review.py
+                                                                    (pruefen je 1 Datei)
         ↓
-gemeinsamer Factory-Runner   factory/guards/run-factory-checks.py   (prueft alle Findings)
+gemeinsamer Factory-Runner   factory/guards/run-factory-checks.py   (ruft beide fuer alle
+                                                                      betroffenen Dateien auf)
         ↓
-Claude Stop-Hook             .claude/hooks/stop-validate-findings.py (ruft den Runner beim Stop-Versuch auf)
+Claude Stop-Hook             .claude/hooks/stop-validate-findings.py (ruft den Runner beim
+                                                                      Stop-Versuch auf)
         ↓
-GitHub CI                    .github/workflows/factory-ci.yml        (ruft denselben Runner-Befehl in GitHub Actions auf)
+GitHub CI                    .github/workflows/factory-ci.yml        (ruft denselben Runner-Befehl
+                              PLUS zusaetzlich, nur hier, den Projekt-Test-Runner auf:
+                              factory/guards/run-project-tests.py -- siehe "Was ist der
+                              Projekt-Test-Runner?" oben fuer den Grund, warum dieser Schritt
+                              bewusst nicht ueber den Stop-Hook laeuft)
 ```
-
-Der Stop-Hook hilft **Claude**, lokal innerhalb einer laufenden Session korrekt zu arbeiten — er
-ist an das Claude-Code-Stop-Ereignis gekoppelt und hat, wie oben beschrieben, eine dokumentierte
-technische Grenze (der 8-Block-Cap).
 
 **Die GitHub-CI (`factory-ci.yml`) ist davon komplett unabhängig.** Sie kennt keine Claude-Session,
-keinen Stop-Hook und kein `stop_hook_active` — sie checkt bei jedem Push auf `main` und bei jedem
-Pull Request gegen `main` den Repository-Zustand frisch aus und lässt exakt denselben Befehl
-laufen, den auch der Stop-Hook und jeder Entwickler lokal ausführen können:
+keinen Stop-Hook und kein `stop_hook_active` — sie checkt bei jedem Push und bei jedem Pull
+Request den Repository-Zustand frisch aus und lässt exakt denselben Befehl laufen, den auch der
+Stop-Hook und jeder Entwickler lokal ausführen können:
 
 ```
 python3 factory/guards/run-factory-checks.py

@@ -64,6 +64,30 @@ Alle anderen sieben `ANALYZED`-Felder (Root Cause, Affected Components, Relevant
 Recommended Repair, Regression Test Plan, Central Guard Plan, Expected Blast Radius) dürfen bei
 `EXPERT_REVIEW_REQUIRED` weiterhin unvollständig sein.
 
+### `READY_FOR_CLOSURE` und `CLOSED`
+
+Zusätzlich zu den acht `ANALYZED`-Pflichtfeldern verlangen diese beiden Zustände drei weitere,
+ebenso sinnvoll (nicht leer, kein Platzhalter) ausgefüllte Felder:
+
+1. **Verification Evidence** – welche Regressions- und relevanten Tests grün liefen (konkret
+   benannt, nicht pauschal).
+2. **CI Evidence** – ein konkreter, echter Verweis auf einen grünen CI-Lauf (z. B. Actions-Run-
+   ID/URL), keine Behauptung ohne Beleg.
+3. **Review Artifact** – der Pfad zu einem Review-Artefakt unter `factory/reviews/` (siehe
+   [`factory/reviews/README.md`](../../factory/reviews/README.md)).
+
+Der Guard prüft zusätzlich **strukturell**, dass die unter `Review Artifact` referenzierte Datei
+tatsächlich existiert und `Result: PASS` enthält — ein referenziertes Review mit `Result: FAIL`
+oder `Result: EXPERT_REVIEW_REQUIRED` blockiert `READY_FOR_CLOSURE`/`CLOSED` genauso wie ein
+fehlendes Review. `CLOSED` erfüllt automatisch dieselben Anforderungen wie `READY_FOR_CLOSURE`
+(kein separates, schwächeres Regelwerk).
+
+Der standardisierte Ablauf dorthin ist der [`verify-finding`-Skill](../skills/verify-finding/SKILL.md);
+das Review selbst führt der unabhängige, rein lesende
+[`finding-closure-reviewer`-Subagent](../agents/finding-closure-reviewer.md) in einem
+getrennten Kontext durch — nicht der implementierende Agent selbst, und dessen Ergebnis darf
+nicht nachträglich überschrieben werden.
+
 ## Freigabe durch Menschen
 
 Ein normaler technischer Befund benötigt **keine** manuelle menschliche Freigabe — Claude trifft
@@ -71,6 +95,11 @@ die technische Entscheidung selbst und dokumentiert sie in den Analysefeldern. M
 Beteiligung ist ausschließlich für den Eskalationsfall `EXPERT_REVIEW_REQUIRED` vorgesehen, wenn
 Claude selbst feststellt, dass eine autonome Entscheidung an dieser Stelle nicht verantwortbar
 ist.
+
+Die verpflichtende unabhängige Review vor `READY_FOR_CLOSURE` (siehe oben) ist **keine**
+menschliche Freigabe — sie wird von einem separaten, rein lesenden Subagenten durchgeführt, nicht
+von einem Menschen. Sie stellt aber sicher, dass die Closure-Entscheidung nicht ausschließlich
+vom selben Agenten getroffen wird, der die Reparatur implementiert hat.
 
 ## Platzhalter, die nicht als "ausgefüllt" zählen
 
